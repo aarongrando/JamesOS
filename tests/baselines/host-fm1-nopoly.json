@@ -1,0 +1,692 @@
+{
+  "runners": [
+    {
+      "runner": "run_396_target_delay.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_adaptive_poly_engine.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_all_engines_audible.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_anim_marks.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_arp.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_arrangement_strip.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_audio_drop_platform.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_bank.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_clock_startup.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_cold_stagger.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_cold_start_old_replay.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_cold_start_policy.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_comp_local.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_control_spacing_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_delay_character.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_delay_laws.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_draw_load.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_drive.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_drum_render_hash.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_env_times.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_filter_chart_height_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_filter_laws.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_filter_settle.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_firmware_metadata.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_flash_wait.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_fm1_install.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_fm1_time_init.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_font_fit.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_fx_knob4_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_fx_render.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_gfx_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_global_filter.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_global_reverb.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_global_shortcuts.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_global_timing.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_guarded_pair_repair.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_guarded_repair_real_v4.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_hd_text.py",
+      "status": "fail"
+    },
+    {
+      "runner": "run_home_algo_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_home_poly_cue.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_keyboard_modes.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_kit_mixer.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_late_drop_protocol.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_lcd_crystal_wait.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_lfo_edit_navigation.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_lfo_mod_law.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_lfo_target_icons_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_lpg_release_audio.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_master_leveler.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_master_limiter.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_master_silence.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_microtiming.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_app_regression.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_channel_ui_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_bias.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_bridge.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_continue.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_control.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_diag.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_engine.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_clock_resilience.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_kit.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_routes.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_session_v16.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_midi_transport.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mix_icon_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mix_laws.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mixer.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mixer_meter.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mod_target_tests.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_model_modulation.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_model_poly_scheduler.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_model_transition_stress.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_mono_priority.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_note_timing.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_output_scale.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_overrun_counter.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_partial_frame_reconstruction.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_patch_track_color_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_arranger.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_arranger_app.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_arranger_transition.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_arranger_ui.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_audio_host.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_bank.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_delete_protocol_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_encoder_hash.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_export_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_fixed_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_foreign_reclaim.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_import_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_manual_independent.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_only_project.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_panel_validation.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_raw_delete_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_raw_export_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_salvage_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_save_cut_runtime.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_sector_diagnostic.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_sector_panel_combined.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_target_ui_lock2.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_pattern_v16_only.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_perform_heat.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_plaits_kit_mix_hoist.py",
+      "status": "needs arguments"
+    },
+    {
+      "runner": "run_plaits_kit_safe_prefix.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_plaits_regression.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_poly_render.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_poly_scheduler.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_poly_two_cores.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_poly_ui.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_poly_units.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_preflight_retry.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_preflight_retry_engine.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_product_switch.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_product_tests.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_project_device_adapter.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_project_list.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_project_store.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_publication_actual.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_punch.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_punch_keys.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_punch_release.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_reader.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_retrig_audio.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_retrig_ui.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_reverb2_golden.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_reverb_sync_app.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_route_badges_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_rv2_design_hash.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_save_cue_stability.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_save_feedback.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_save_led_stability.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_save_ux_1953.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_screen_map.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_screen_transitions_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_seq_behaviour.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_seq_cue_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_seq_defaults.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_seq_leds.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_seq_top_gap_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_old_store.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_pcm.py",
+      "status": "needs arguments"
+    },
+    {
+      "runner": "run_session_protection.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_retrig.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_v17.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_v5_store.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_session_wire.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_shape_symmetry_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_smk37_units.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_smk_fader_link.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_smk_faders.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_smk_seq_keys.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_smk_track_arrows.py",
+      "status": "skip"
+    },
+    {
+      "runner": "run_sound_record.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_startup_art.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_suite_targeting.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_take_pattern_capacity.py",
+      "status": "needs arguments"
+    },
+    {
+      "runner": "run_target_raw_callbacks_independent.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_target_wait_orchestration.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_track_patch_home_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_track_redraw.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_ui_polish_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_ui_tidy_hd.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_ui_timing_diag.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_v4_conversion_cli.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_v4_migration_import.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_v4_migration_proof.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_validate_package_padding.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_vendor_boot_validation.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_wave_inflate_probe.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_worker_absolute_wait.py",
+      "status": "pass"
+    },
+    {
+      "runner": "run_worker_fault_recovery.py",
+      "status": "pass"
+    }
+  ]
+}

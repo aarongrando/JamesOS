@@ -1,4 +1,4 @@
-# Changelog: 1.0a (build 2108) to 1.0b (build 3083)
+# Changelog: 1.0a (build 2108) to 1.0b (builds 3083 and 3110)
 
 Terse and dated. Sources: `git log 21c4fcb..HEAD` (about 600 commits), the build scripts and candidate folders of 16 and 17 November 2026 and the release records. Times are local to the build machine.
 
@@ -8,7 +8,7 @@ Reading guide:
 - Git history is grouped by day because most builds were not committed one by one. The 16 November source was committed in three integration commits and, after build 3077, in one commit that holds the whole working tree.
 - **NOT RECONSTRUCTED** marks a range where the builds exist or are numbered but their individual contents could not be recovered from the records available.
 - Items are firmware changes unless they say test, tool or documentation.
-- Build 3083 is the release build, built from commit `c7c010b`. Its package hashes are in `docs/RELEASE-1.0b.md`.
+- Build 3083 was the first 1.0b release, built from commit `c7c010b`. Build 3110 of 19 November 2026 replaces it; its changes are listed in `docs/RELEASE-1.0b.md` under "Changes in build 3110", with the package hashes.
 
 ## Summary table
 

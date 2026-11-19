@@ -373,15 +373,15 @@ class ResonatorSvf {
 #if FM1_MODAL_MULTIRATE_LOW_MODES
       , bool low_rate = false
 #endif
-      ) {
+      , bool zero_block = false) {
 #if FM1_MODAL_PERSISTENT_FLOAT_DIRECT_CACHE_HIT
 #if FM1_MODAL_MULTIRATE_LOW_MODES
     if (!low_rate && batch_size == kModeBatchSize &&
         size <= kMaxBlockSize &&
-        TryProcessCachedDirectForm<mode, add>(cached, in, out, size)) return;
+        TryProcessCachedDirectForm<mode, add>(cached, in, out, size, zero_block)) return;
 #else
     if (batch_size == kModeBatchSize && size <= kMaxBlockSize &&
-        TryProcessCachedDirectForm<mode, add>(cached, in, out, size)) return;
+        TryProcessCachedDirectForm<mode, add>(cached, in, out, size, zero_block)) return;
 #endif
 #endif
 #if FM1_MODAL_MODE_FIRST && !FM1_MODAL_DIRECT_FORM
@@ -1211,7 +1211,7 @@ class ResonatorSvf {
       const CachedGain* cached_gain,
       const float* in,
       float* out,
-      size_t size) {
+      size_t size, bool zero_block = false) {
     if (batch_size != kModeBatchSize || size > kMaxBlockSize) {
       return false;
     }
@@ -1244,6 +1244,12 @@ class ResonatorSvf {
     const float input_last1 = size ? process_input[size - 1] : input_x1_;
     const float input_last2 = size > 1 ? process_input[size - 2] : input_x1_;
 
+    // A silent slice still has excitation if either delayed input is nonzero.
+    uint32_t prev1_bits, prev2_bits;
+    __builtin_memcpy(&prev1_bits, &input_x1_, sizeof(prev1_bits));
+    __builtin_memcpy(&prev2_bits, &input_x2_, sizeof(prev2_bits));
+    const bool silent_input = zero_block && (prev1_bits | prev2_bits) == 0;
+
     for (int i = 0; i < kModeBatchSize; i += 2) {
       const float gain_a = CachedModeGain(cached_gain, i);
       const float gain_b = CachedModeGain(cached_gain, i + 1);
@@ -1257,32 +1263,53 @@ class ResonatorSvf {
       float y2a = direct_y2_[i];
       float y1b = direct_y1_[i + 1];
       float y2b = direct_y2_[i + 1];
-#if FM1_MODAL_STREAMED_INPUT_HISTORY
-      float input_history_1 = input_x1_;
-      float input_history_2 = input_x2_;
+      if (silent_input) {
+#if defined(__clang__) && __clang_major__ >= 12
+#pragma clang fp reassociate(off)
 #endif
-      for (size_t j = 0; j < size; ++j) {
-        const float x = process_input[j];
+        // All inputs and both lags are +0. Keep the rounded drive operand
+        // and the original subtraction and mix order, including signed zeros.
+        const float drive_a = b0a * input_x1_;
+        const float drive_b = b0b * input_x1_;
+        for (size_t j = 0; j < size; ++j) {
+          const float ya = drive_a - a1a * y1a - a2a * y2a;
+          if (add || i > 0) out[j] += gain_a * ya;
+          else out[j] = gain_a * ya;
+          const float yb = drive_b - a1b * y1b - a2b * y2b;
+          out[j] += gain_b * yb;
+          y2a = y1a;
+          y1a = ya;
+          y2b = y1b;
+          y1b = yb;
+        }
+      } else {
 #if FM1_MODAL_STREAMED_INPUT_HISTORY
-        const float x2 = input_history_2;
+        float input_history_1 = input_x1_;
+        float input_history_2 = input_x2_;
+#endif
+        for (size_t j = 0; j < size; ++j) {
+          const float x = process_input[j];
+#if FM1_MODAL_STREAMED_INPUT_HISTORY
+          const float x2 = input_history_2;
 #else
-        const float x2 = j >= 2 ? process_input[j - 2]
-            : (j == 1 ? input_x1_ : input_x2_);
+          const float x2 = j >= 2 ? process_input[j - 2]
+              : (j == 1 ? input_x1_ : input_x2_);
 #endif
-        const float ya = b0a * (x - x2) - a1a * y1a - a2a * y2a;
-        const float contribution_a = gain_a * ya;
-        if (add || i > 0) out[j] += contribution_a;
-        else out[j] = contribution_a;
-        const float yb = b0b * (x - x2) - a1b * y1b - a2b * y2b;
-        out[j] += gain_b * yb;
-        y2a = y1a;
-        y1a = ya;
-        y2b = y1b;
-        y1b = yb;
+          const float ya = b0a * (x - x2) - a1a * y1a - a2a * y2a;
+          const float contribution_a = gain_a * ya;
+          if (add || i > 0) out[j] += contribution_a;
+          else out[j] = contribution_a;
+          const float yb = b0b * (x - x2) - a1b * y1b - a2b * y2b;
+          out[j] += gain_b * yb;
+          y2a = y1a;
+          y1a = ya;
+          y2b = y1b;
+          y1b = yb;
 #if FM1_MODAL_STREAMED_INPUT_HISTORY
-        input_history_2 = input_history_1;
-        input_history_1 = x;
+          input_history_2 = input_history_1;
+          input_history_1 = x;
 #endif
+        }
       }
 #if STMLIB_FLUSH_TINY_FILTER_STATES
       y1a = __builtin_fabsf(y1a) < 1.0e-20f ? 0.0f : y1a;

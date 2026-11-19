@@ -55,101 +55,108 @@ class NESTriangleOscillator {
   }
   
   inline void Render(float frequency, float* out, size_t size) {
-    // Compute all constants needed to scale the waveform and its
-    // discontinuities.
-    const int num_steps = 1 << num_bits;
-    const int half = num_steps / 2;
-    const int top = num_steps != 2 ? num_steps - 1 : 2;
-    const float num_steps_f = static_cast<float>(num_steps);
-    const float scale = num_steps != 2
-        ? 4.0f / static_cast<float>(top - 1)
-        : 2.0f;
-    
     frequency = std::min(frequency, 0.25f);
-    
+
     stmlib::ParameterInterpolator fm(&frequency_, frequency, size);
-    
+
     float next_sample = next_sample_;
     while (size--) {
-      const float frequency = fm.Next();
-      phase_ += frequency;
-      
-      // Compute the point at which we transition between the "full resolution"
-      // NES triangle, and a naive band-limited triangle.
-      float fade_to_tri = (frequency - 0.5f / num_steps_f) * 2.0f * num_steps_f;
-      CONSTRAIN(fade_to_tri, 0.0f, 1.0f)
-      
-      const float nes_gain = 1.0f - fade_to_tri;
-      const float tri_gain = fade_to_tri * 2.0f / scale;
-      
+      const float f = fm.Next();
+      phase_ += f;
+
+      // Outside the crossfade, one waveform has exactly zero gain.
       float this_sample = next_sample;
-      next_sample = 0.0f;
-      
-      // Handle the discontinuity at the top of the naive triangle.
-      if (ascending_ && phase_ >= 0.5f) {
-        float discontinuity = 4.0f * frequency * tri_gain;
-        if (discontinuity) {
-          float t = (phase_ - 0.5f) / frequency;
-          this_sample -= stmlib::ThisIntegratedBlepSample(t) * discontinuity;
-          next_sample -= stmlib::NextIntegratedBlepSample(t) * discontinuity;
-        }
-        ascending_ = false;
+      if (f <= 0.5f / kNumStepsF) {
+        next_sample = NextSample<false>(f, 1.0f, 0.0f, this_sample);
+      } else if (f >= 1.0f / kNumStepsF) {
+        next_sample = NextSample<true>(f, 0.0f, 2.0f / kScale, this_sample);
+      } else {
+        const float fade = (f - 0.5f / kNumStepsF) * 2.0f * kNumStepsF;
+        next_sample = NextSample<true>(f, 1.0f - fade, fade * 2.0f / kScale, this_sample);
       }
-
-      int next_step = static_cast<int>(phase_ * num_steps_f);
-      if (next_step != step_) {
-        bool wrap = false;
-        if (next_step >= num_steps) {
-          phase_ -= 1.0f;
-          next_step -= num_steps;
-          wrap = true;
-        }
-        
-        float discontinuity = next_step < half ? 1.0f : -1.0f;
-        if (num_steps == 2) {
-          discontinuity = -discontinuity;
-        } else {
-          if (next_step == 0 || next_step == half) {
-            discontinuity = 0.0f;
-          }
-        }
-
-        // Handle the discontinuity at each step of the NES triangle.
-        discontinuity *= nes_gain;
-        if (discontinuity) {
-          float frac = (phase_ * num_steps_f - static_cast<float>(next_step));
-          float t = frac / (frequency * num_steps_f);
-          this_sample += stmlib::ThisBlepSample(t) * discontinuity;
-          next_sample += stmlib::NextBlepSample(t) * discontinuity;
-        }
-        
-        // Handle the discontinuity at the bottom of the naive triangle.
-        if (wrap) {
-          float discontinuity = 4.0f * frequency * tri_gain;
-          if (discontinuity) {
-            float t = phase_ / frequency;
-            this_sample += stmlib::ThisIntegratedBlepSample(t) * discontinuity;
-            next_sample += stmlib::NextIntegratedBlepSample(t) * discontinuity;
-          }
-          ascending_ = true;
-        }
-      }
-      step_ = next_step;
-      
-      // Contribution from NES triangle.
-      next_sample += nes_gain * \
-          static_cast<float>(step_ < half ? step_ : top - step_);
-
-      // Contribution from naive triangle.
-      next_sample += tri_gain * \
-          (phase_ < 0.5f ? 2.0f * phase_ : 2.0f - 2.0f * phase_);
-      
-      *out++ = this_sample * scale - 1.0f;
+      *out++ = this_sample * kScale - 1.0f;
     }
     next_sample_ = next_sample;
   }
- 
+
  private:
+  static constexpr int kNumSteps = 1 << num_bits;
+  static constexpr int kHalf = kNumSteps / 2;
+  static constexpr int kTop = kNumSteps != 2 ? kNumSteps - 1 : 2;
+  static constexpr float kNumStepsF = static_cast<float>(kNumSteps);
+  static constexpr float kScale = kNumSteps != 2
+      ? 4.0f / static_cast<float>(kTop - 1)
+      : 2.0f;
+
+  template<bool smooth_component>
+  __attribute__((always_inline)) inline float NextSample(
+      float frequency, float nes_gain, float tri_gain, float& this_sample) {
+    float next_sample = 0.0f;
+    // Handle the discontinuity at the top of the naive triangle.
+    if (ascending_ && phase_ >= 0.5f) {
+      float discontinuity = 4.0f * frequency * tri_gain;
+      if (discontinuity) {
+        float t = (phase_ - 0.5f) / frequency;
+        this_sample -= stmlib::ThisIntegratedBlepSample(t) * discontinuity;
+        next_sample -= stmlib::NextIntegratedBlepSample(t) * discontinuity;
+      }
+      ascending_ = false;
+    }
+
+    int next_step = static_cast<int>(phase_ * kNumStepsF);
+    if (next_step != step_) {
+      bool wrap = false;
+      if (next_step >= kNumSteps) {
+        phase_ -= 1.0f;
+        next_step -= kNumSteps;
+        wrap = true;
+      }
+
+      float discontinuity = next_step < kHalf ? 1.0f : -1.0f;
+      if (kNumSteps == 2) {
+        discontinuity = -discontinuity;
+      } else {
+        if (next_step == 0 || next_step == kHalf) {
+          discontinuity = 0.0f;
+        }
+      }
+
+      // Handle the discontinuity at each step of the NES triangle.
+      discontinuity *= nes_gain;
+      if (discontinuity) {
+        float frac = (phase_ * kNumStepsF - static_cast<float>(next_step));
+        float t = frac / (frequency * kNumStepsF);
+        this_sample += stmlib::ThisBlepSample(t) * discontinuity;
+        next_sample += stmlib::NextBlepSample(t) * discontinuity;
+      }
+
+      // Handle the discontinuity at the bottom of the naive triangle.
+      if (wrap) {
+        float discontinuity = 4.0f * frequency * tri_gain;
+        if (discontinuity) {
+          float t = phase_ / frequency;
+          this_sample += stmlib::ThisIntegratedBlepSample(t) * discontinuity;
+          next_sample += stmlib::NextIntegratedBlepSample(t) * discontinuity;
+        }
+        ascending_ = true;
+      }
+    }
+    step_ = next_step;
+
+    // Contribution from NES triangle.
+    next_sample += nes_gain * \
+        static_cast<float>(step_ < kHalf ? step_ : kTop - step_);
+
+    // The omitted product is positive zero throughout the normalized phase.
+    if (smooth_component) {
+      next_sample += tri_gain *
+          (phase_ < 0.5f ? 2.0f * phase_ : 2.0f - 2.0f * phase_);
+    } else {
+      next_sample += 0.0f;
+    }
+    return next_sample;
+  }
+
   // Oscillator state.
   float phase_;
   float next_sample_;

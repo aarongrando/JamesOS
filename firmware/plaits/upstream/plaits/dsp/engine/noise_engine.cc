@@ -86,21 +86,37 @@ void NoiseEngine::Render(
   
   const float* in_1 = aux;
   const float* in_2 = temp_buffer_;
-  while (size--) {
-    const float f0 = f0_modulation.Next();
-    const float f1 = f1_modulation.Next();
-    const float q = q_modulation.Next();
-    const float gain = 1.0f / Sqrt((0.5f + q) * 40.0f * f0);
-    lp_hp_filter_.set_f_q<FREQUENCY_ACCURATE>(f0, q);
-    bp_filter_[0].set_f_q<FREQUENCY_ACCURATE>(f0, q);
-    bp_filter_[1].set_f_q<FREQUENCY_ACCURATE>(f1, q);
-    
+  auto process_sample = [&](float gain) {
     float input_1 = *in_1++ * gain;
     float input_2 = *in_2++ * gain;
     lp_hp_filter_.ProcessMultimodeLPtoHP(
         &input_1, out++, 1, mode_modulation.Next());
     *aux++ = bp_filter_[0].Process<FILTER_MODE_BAND_PASS>(input_1) + \
         bp_filter_[1].Process<FILTER_MODE_BAND_PASS>(input_2);
+  };
+  // A rounded interpolation step can leave a value stationary even if the
+  // target is a few ulps away. Once an addition stalls it will keep stalling.
+  const float first_f0 = f0_modulation.subsample(1.0f);
+  const float first_f1 = f1_modulation.subsample(1.0f);
+  const float first_q = q_modulation.subsample(1.0f);
+  if (size && first_f0 == previous_f0_ && first_f1 == previous_f1_ &&
+      first_q == previous_q_) {
+    const float gain = 1.0f / Sqrt((0.5f + first_q) * 40.0f * first_f0);
+    lp_hp_filter_.set_f_q<FREQUENCY_ACCURATE>(first_f0, first_q);
+    bp_filter_[0].CopyCoefficientsAndCacheFrom(lp_hp_filter_);
+    bp_filter_[1].set_f_q<FREQUENCY_ACCURATE>(first_f1, first_q);
+    while (size--) process_sample(gain);
+  } else {
+    while (size--) {
+      const float f0 = f0_modulation.Next();
+      const float f1 = f1_modulation.Next();
+      const float q = q_modulation.Next();
+      const float gain = 1.0f / Sqrt((0.5f + q) * 40.0f * f0);
+      lp_hp_filter_.set_f_q<FREQUENCY_ACCURATE>(f0, q);
+      bp_filter_[0].CopyCoefficientsAndCacheFrom(lp_hp_filter_);
+      bp_filter_[1].set_f_q<FREQUENCY_ACCURATE>(f1, q);
+      process_sample(gain);
+    }
   }
 }
 

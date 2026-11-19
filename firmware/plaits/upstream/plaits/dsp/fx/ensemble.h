@@ -62,52 +62,56 @@ class Ensemble {
     E::DelayLine<Memory, 1> line_r;
     E::Context c;
     
-    while (size--) {
-      engine_.Start(&c);
-      float dry_amount = 1.0f - amount_ * 0.5f;
-    
-      // Update LFO.
-      const uint32_t one_third = 1417339207UL;
-      const uint32_t two_third = 2834678415UL;
-      
-      phase_1_ += 67289; // 0.75 Hz
-      phase_2_ += 589980; // 6.57 Hz
-      float slow_0 = SineRaw(phase_1_);
-      float slow_120 = SineRaw(phase_1_ + one_third);
-      float slow_240 = SineRaw(phase_1_ + two_third);
+    const float dry_amount = 1.0f - amount_ * 0.5f;
+    const float a = depth_ * 160.0f;
+    const float b = depth_ * 16.0f;
+    while (size) {
+      phase_1_ += kSlowStep;
+      phase_2_ += kFastStep;
+      // Keep fast lookups first to preserve the stock relaxed-FP offset grouping.
       float fast_0 = SineRaw(phase_2_);
-      float fast_120 = SineRaw(phase_2_ + one_third);
-      float fast_240 = SineRaw(phase_2_ + two_third);
-      
-      // Max deviation: 176
-      float a = depth_ * 160.0f;
-      float b = depth_ * 16.0f;
+      float fast_120 = SineRaw(phase_2_ + kOneThird);
+      float fast_240 = SineRaw(phase_2_ + kTwoThirds);
+      float slow_0 = SineRaw(phase_1_);
+      float slow_120 = SineRaw(phase_1_ + kOneThird);
+      float slow_240 = SineRaw(phase_1_ + kTwoThirds);
       
       float mod_1 = slow_0 * a + fast_0 * b;
       float mod_2 = slow_120 * a + fast_120 * b;
       float mod_3 = slow_240 * a + fast_240 * b;
     
-      float wet = 0.0f;
-    
-      // Sum L & R channel to send to chorus line.
-      c.Read(*left, 1.0f);
-      c.Write(line_l, 0.0f);
-      c.Read(*right, 1.0f);
-      c.Write(line_r, 0.0f);
-    
-      c.Interpolate(line_l, mod_1 + 192, 0.33f);
-      c.Interpolate(line_l, mod_2 + 192, 0.33f);
-      c.Interpolate(line_r, mod_3 + 192, 0.33f);
-      c.Write(wet, 0.0f);
-      *left = wet * amount_ + *left * dry_amount;
-      
-      c.Interpolate(line_r, mod_1 + 192, 0.33f);
-      c.Interpolate(line_r, mod_2 + 192, 0.33f);
-      c.Interpolate(line_l, mod_3 + 192, 0.33f);
-      c.Write(wet, 0.0f);
-      *right = wet * amount_ + *right * dry_amount;
-      left++;
-      right++;
+      // SineRaw reads a single table cell. Hold the three offsets for exactly
+      // as long as all six lookups select their current cells.
+      const size_t run = std::min(size, static_cast<size_t>(1 + std::min(
+          FramesBeforeCellChange<kSlowStep>(phase_1_),
+          FramesBeforeCellChange<kFastStep>(phase_2_))));
+      size -= run;
+      phase_1_ += (run - 1) * kSlowStep;
+      phase_2_ += (run - 1) * kFastStep;
+      for (size_t i = 0; i < run; ++i) {
+        engine_.Start(&c);
+        float wet = 0.0f;
+
+        // Sum L & R channel to send to chorus line.
+        c.Read(*left, 1.0f);
+        c.Write(line_l, 0.0f);
+        c.Read(*right, 1.0f);
+        c.Write(line_r, 0.0f);
+
+        c.Interpolate(line_l, mod_1 + 192, 0.33f);
+        c.Interpolate(line_l, mod_2 + 192, 0.33f);
+        c.Interpolate(line_r, mod_3 + 192, 0.33f);
+        c.Write(wet, 0.0f);
+        *left = wet * amount_ + *left * dry_amount;
+
+        c.Interpolate(line_r, mod_1 + 192, 0.33f);
+        c.Interpolate(line_r, mod_2 + 192, 0.33f);
+        c.Interpolate(line_l, mod_3 + 192, 0.33f);
+        c.Write(wet, 0.0f);
+        *right = wet * amount_ + *right * dry_amount;
+        left++;
+        right++;
+      }
     }
   }
   
@@ -120,6 +124,24 @@ class Ensemble {
   }
   
  private:
+  static constexpr uint32_t kOneThird = 1417339207u;
+  static constexpr uint32_t kTwoThirds = 2834678415u;
+  static constexpr uint32_t kSlowStep = 67289u;
+  static constexpr uint32_t kFastStep = 589980u;
+
+  template<uint32_t step>
+  static inline uint32_t FramesBeforeCellChange(uint32_t phase) {
+    const uint32_t cell = 1u << (32 - kSineLUTBits);
+    const uint32_t mask = cell - 1;
+    const uint32_t first = cell - (kOneThird & mask);
+    const uint32_t second = cell - (kTwoThirds & mask);
+    static_assert(first < second, "ensemble phase offsets must be in cell order");
+    const uint32_t fraction = phase & mask;
+    const uint32_t end = fraction < first ? first
+        : (fraction < second ? second : cell);
+    return (end - 1 - fraction) / step;
+  }
+
   E engine_;
   
   float amount_;

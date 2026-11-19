@@ -56,6 +56,9 @@ void plaits_note_on(void *state, uint32_t model, int32_t pitch_q7,
 void plaits_note_off(void *state, uint32_t raw_note);
 void plaits_all_off(void *state);
 uint32_t plaits_quiet(const void *state);
+/* The voice's release window (polyphonic voices): today's long window, not the warm-keep table. */
+void plaits_skip_frames(void* state, uint32_t n);
+uint32_t plaits_quiet_long(const void *state);
 /* Read-only predispatch cost-class query; does not mutate the voice. */
 int32_t plaits_active_engine(const void *state);
 /* Writes all n frames. Larger requests are split into FIFO-safe chunks. */

@@ -115,7 +115,8 @@ void RenderOperators(
     }
     for (int i = 0; i < n; ++i) {
       phase[i] += frequency[i];
-      pm = SinePM(phase[i], pm) * amplitude[i];
+      pm = SinePM(phase[i], pm,
+          i != 0 || modulation_source != Operator::MODULATION_SOURCE_NONE) * amplitude[i];
       amplitude[i] += amplitude_increment[i];
       if (i == modulation_source) {
         previous_1 = previous_0;

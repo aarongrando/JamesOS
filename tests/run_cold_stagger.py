@@ -26,7 +26,12 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     with (out / 'compile.log').open('w') as log:
         if not args.reuse_dsp:
-            subprocess.run(['sh', 'tools/build_braids_host.sh'], cwd=ROOT,
+            import os
+            env = dict(os.environ)
+            # The test is built at 44.1 kHz; the Plaits objects must use the same rate for the quiet windows to agree.
+            env['PLAITS_CXXFLAGS'] = ' '.join([env.get('PLAITS_CXXFLAGS', ''), '-DFM1_NATIVE_OUTPUT_32K=0',
+                                               '-DFM1_NATIVE_OUTPUT_48K=0'])
+            subprocess.run(['sh', 'tools/build_braids_host.sh'], cwd=ROOT, env=env,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
         objects = sorted((ROOT / 'build/host/braids').glob('*.o'))
         objects += sorted((ROOT / 'build/host/plaits_reference').glob('*.o'))

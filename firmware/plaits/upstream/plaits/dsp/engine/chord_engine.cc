@@ -144,7 +144,7 @@ void ChordEngine::Render(
     divide_down_amount *= divide_down_gain;
     
     if (wavetable_amount) {
-      wavetable_voice_[note].Render(
+      wavetable_voice_[note].RenderChord(
           note_f0 * 1.004f,
           note_amplitudes[note] * wavetable_amount,
           waveform,

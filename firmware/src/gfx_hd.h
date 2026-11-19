@@ -18,15 +18,15 @@
 
 /* ---- core: shared by shapes (gfx_hd.h) and text (gfx_hd_text.h) ---- */
 
-/* Mix two RGB565 colours. t = 0 gives a, t = 255 gives b. */
+/* Mix two RGB565 colours. t = 0 gives a, t = 255 gives b (callers pass 0..255). Per channel
+ * (a * (256 - t) + b * t) >> 8 = a + (((b - a) * t) >> 8): 256 * a is a multiple of 256, so the floor splits, and
+ * the shift of the negative difference is arithmetic (as in the filter code and hd__rrect's dither). */
 static inline uint16_t hd_mix(uint16_t a, uint16_t b, uint32_t t)
 {
-    uint32_t ar = a >> 11, ag = (a >> 5) & 63u, ab = a & 31u;
-    uint32_t br = b >> 11, bg = (b >> 5) & 63u, bb = b & 31u;
-    t += t >> 7;                                  /* 0..256 */
-    return (uint16_t)((((ar * (256u - t) + br * t) >> 8) << 11) |
-                      (((ag * (256u - t) + bg * t) >> 8) << 5) |
-                      ((ab * (256u - t) + bb * t) >> 8));
+    int32_t ar = a >> 11, ag = (a >> 5) & 63, ab = a & 31, s = (int32_t)(t + (t >> 7));   /* s: 0..256 */
+    return (uint16_t)(((ar + ((((int32_t)(b >> 11) - ar) * s) >> 8)) << 11) |
+                      ((ag + ((((int32_t)((b >> 5) & 63u) - ag) * s) >> 8)) << 5) |
+                      (ab + ((((int32_t)(b & 31u) - ab) * s) >> 8)));
 }
 
 /* Read a canvas pixel in native RGB565. Coordinates are graph coordinates
@@ -45,6 +45,37 @@ static inline void hd_blend(int32_t x, int32_t y, uint16_t c, uint32_t a)
     if (!a || (uint32_t)x >= cv_w || (uint32_t)y >= cv_h) return;
     uint16_t *p = &cv_px[(uint32_t)y * cv_w + (uint32_t)x];
     *p = a >= 255u ? swap16(c) : swap16(hd_mix(swap16(*p), c, a));
+}
+
+/* A colour prepared for the many pixels of one shape: its channels unpacked once, and the panel's byte order
+ * for the opaque case. hd__pp blends it over a canvas pixel the caller already knows lies in the strip (after
+ * hd__clip, or a column and row it checked), so there is no call, no bounds test and no y * cv_w per pixel
+ * where the caller steps a pointer. The arithmetic is hd_blend's (tests/test_hd_mix_hd.c). */
+typedef struct { uint16_t sw; int16_t r, g, b; } hd_src_t;
+static inline hd_src_t hd_src(uint16_t c)
+{
+    hd_src_t s;
+    s.sw = swap16(c); s.r = (int16_t)(c >> 11); s.g = (int16_t)((c >> 5) & 63u); s.b = (int16_t)(c & 31u);
+    return s;
+}
+static inline uint16_t *hd__at(int32_t x, int32_t y)       /* a graph pixel inside the strip */
+{
+    return &cv_px[(uint32_t)(y + cv_oy) * cv_w + (uint32_t)(x - cv_ox)];
+}
+static inline __attribute__((always_inline)) void hd__pp(uint16_t *p, const hd_src_t *s, uint32_t a)   /* a: 0..255 */
+{
+    int32_t t, dr, dg, db, d;
+    if (!a) return;
+    if (a >= 255u) { *p = s->sw; return; }
+    d = swap16(*p); t = (int32_t)(a + (a >> 7));
+    dr = d >> 11; dg = (d >> 5) & 63; db = d & 31;
+    *p = swap16((uint32_t)(((dr + (((s->r - dr) * t) >> 8)) << 11) | ((dg + (((s->g - dg) * t) >> 8)) << 5) |
+                           (db + (((s->b - db) * t) >> 8))));
+}
+/* hd__px for a pixel inside the strip, with a prepared colour and a coverage that may be out of range. */
+static inline void hd__pc(int32_t x, int32_t y, const hd_src_t *s, int32_t a)
+{
+    if (a > 0) hd__pp(hd__at(x, y), s, a > 255 ? 255u : (uint32_t)a);
 }
 
 /* ---- shapes: added below this line ---- */
@@ -147,6 +178,7 @@ static void hd_line_q8(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t 
     b[1] = ((dy < 0 ? ay + dy : ay) * 16 - hw - 256) >> 8;
     b[3] = ((dy < 0 ? ay : ay + dy) * 16 + hw + 256) >> 8;
     if (!width || !hd__clip(b)) return;
+    hd_src_t src = hd_src(c);
     for (y = b[1]; y <= b[3]; ++y)
         for (x = b[0]; x <= b[2]; ++x) {
             int32_t vx = x * 16 + 8 - ax, vy = y * 16 + 8 - ay, d;
@@ -156,7 +188,7 @@ static void hd_line_q8(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t 
                 if (hd__far(vx, vy, hw + 128)) continue;
                 d = hd__len(vx, vy);
             } else { d = (vx * uy - vy * ux) >> 8; if (d < 0) d = -d; }  /* q8 across */
-            if (hw - d + 128 > 0) hd__px(x, y, c, hw - d + 128);
+            if (hw - d + 128 > 0) hd__pc(x, y, &src, hw - d + 128);
         }
 }
 
@@ -204,6 +236,7 @@ static void hd__radial(int32_t cx, int32_t cy, int32_t r, int32_t w,
         }
     }
     if (r < 0 || !hd__clip(b)) return;
+    hd_src_t src = hd_src(c);
     for (y = b[1]; y <= b[3]; ++y) {
         /* Only the columns where (dx^2 + dy^2) * 256 < out^2 can be covered (hd__zone 0 elsewhere): the row's
          * span from an integer square root (dx^2 < ceil(out^2 / 256) - dy^2), widened by a column each side. */
@@ -233,7 +266,7 @@ static void hd__radial(int32_t cx, int32_t cy, int32_t r, int32_t w,
                 if (a > 255) a = 255;
             }
             if (m < 256) a = a * m >> 8;
-            hd__px(x, y, c, a);
+            hd__pc(x, y, &src, a);
         }
     }
 }
@@ -318,7 +351,11 @@ static void hd__rrect(int32_t x0, int32_t y0, int32_t w, int32_t h, int32_t r,
             if (cy) continue;
             m0 = x0; m1 = x0 + w - 1; step = w > 1 ? w - 1 : 1;
         }
-        for (x = m0; x <= m1; x += step) hd_blend(x, y, col[x & 3], 255u);   /* opaque run (hd_blend clips) */
+        if (step == 1) {                                    /* an opaque run inside the clipped box: stored as it is */
+            uint16_t sc[4], *p = hd__at(m0, y);
+            for (x = 0; x < 4; ++x) sc[x] = swap16(col[x]);
+            for (x = m0; x <= m1; ++x) *p++ = sc[x & 3];
+        } else for (x = m0; x <= m1; x += step) hd_blend(x, y, col[x & 3], 255u);   /* (a frame's sides: hd_blend clips) */
     }
 }
 
@@ -368,6 +405,7 @@ static void hd_poly4(const int32_t px[4], const int32_t py[4], uint16_t c)
     }
     --b[0]; --b[1]; ++b[2]; ++b[3];
     if (!area || !hd__clip(b)) return;
+    hd_src_t src = hd_src(c);
     for (y = b[1]; y <= b[3]; ++y)
         for (x = b[0]; x <= b[2]; ++x) {
             int32_t a = 1 << 20;
@@ -376,7 +414,7 @@ static void hd_poly4(const int32_t px[4], const int32_t py[4], uint16_t c)
                     int32_t d = ((x - px[i]) * nx[i] + (y - py[i]) * ny[i]) >> 4;
                     if (d < a) a = d;
                 }
-            hd__px(x, y, c, a + 128);
+            hd__pc(x, y, &src, a + 128);
         }
 }
 

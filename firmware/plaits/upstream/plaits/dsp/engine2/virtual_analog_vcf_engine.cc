@@ -163,14 +163,21 @@ void VirtualAnalogVCFEngine::Render(
       &previous_q_, q, size);
   ParameterInterpolator gain_modulation(&previous_gain_, gain, size);
   
+  // A ramp whose first rounded addition stays at its stored value will
+  // produce that value throughout the block. Both filters then retain
+  // the coefficients prepared on its first frame.
+  const bool held_filter =
+      cutoff_modulation.subsample(1.0f) == previous_cutoff_ &&
+      q_modulation.subsample(1.0f) == previous_q_;
+  const size_t coefficient_frames = held_filter ? 1 : size;
   for (size_t i = 0; i < size; ++i) {
-    const float cutoff = FM1_VCF_MIN(cutoff_modulation.Next(), 0.25f);
-    const float q = q_modulation.Next();
+    if (i < coefficient_frames) {
+      const float cutoff = FM1_VCF_MIN(cutoff_modulation.Next(), 0.25f);
+      const float q = q_modulation.Next();
+      svf_[0].set_f_q<FREQUENCY_FAST>(cutoff, 0.5f + q);
+      svf_[1].set_f_q<FREQUENCY_FAST>(cutoff, 0.5f + 0.025f * q);
+    }
     const float stage2_gain = stage2_gain_modulation.Next();
-
-    svf_[0].set_f_q<FREQUENCY_FAST>(cutoff, 0.5f + q);
-    svf_[1].set_f_q<FREQUENCY_FAST>(cutoff, 0.5f + 0.025f * q);
-    
     const float gain = gain_modulation.Next();
     const float input = SoftClip(
         (out[i] + aux[i] * sub_gain_modulation.Next()) * gain);

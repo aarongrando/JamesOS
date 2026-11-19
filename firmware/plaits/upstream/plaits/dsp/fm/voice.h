@@ -260,8 +260,12 @@ class Voice {
       const float level_mod = 1.0f - sensitivity * parameters.amp_mod;
       a[i] = Pow2Fast<2>(-14.0f + level) * level_mod;
 #else
-      const float log_level_mod = sensitivity * parameters.amp_mod - 1.0f;
-      const float level_mod = 1.0f - Pow2Fast<2>(6.4f * log_level_mod);
+      // At zero depth, Pow2Fast<2>(-6.4f) has exponent -7.
+      constexpr float fraction = 7.0f - 6.4f;
+      constexpr float unmodulated = 1.0f - Pow2Fraction2(fraction) * (1.0f / 128.0f);
+      const float level_mod = sensitivity == 0.0f || parameters.amp_mod == 0.0f
+          ? unmodulated
+          : 1.0f - Pow2Fast<2>(6.4f * (sensitivity * parameters.amp_mod - 1.0f));
       a[i] = Pow2Fast<2>(-14.0f + level * level_mod);
 #endif  // FAST_LINEAR_AMPLITUDE_MODULATION
     }

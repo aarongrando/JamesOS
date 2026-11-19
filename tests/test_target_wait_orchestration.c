@@ -135,6 +135,22 @@ static uint32_t br_audio_source_c0_late_ack_ready(
     return c0_late_ack_ready;
 }
 
+/* The late wait (instrument_audio.c br_audio_c1_late_wait): polls to the hang limit without a reset. The
+ * default here is the hang case (TIMEOUT), so the older assertions keep their meaning; late_wait_status = OK
+ * is a late but healthy CPU1 that completed. */
+static uint32_t late_wait_status = FM1_CPU1_WORKER_TIMEOUT, late_wait_calls;
+static uint32_t br_audio_c1_late_wait(uint32_t seq, uint32_t late_deadline, uint32_t *result)
+{
+    (void)late_deadline;
+    ++late_wait_calls;
+    if (late_wait_status == FM1_CPU1_WORKER_OK) {
+        fm1_cpu1_worker_mailbox.done_seq = seq;
+        fm1_cpu1_worker_mailbox.result = wait_result;
+        *result = wait_result;
+    }
+    return late_wait_status;
+}
+
 uint32_t fm1_cpu1_worker_poll_until(uint32_t seq, uint32_t deadline, uint32_t *result)
 {
     (void)seq; (void)deadline; ++poll_calls;
@@ -240,6 +256,7 @@ static void reset(uint32_t deadline)
     owner_known = br_audio_source_fx_fusion_active = 1u;
     fusion_only = four_way_kit = 1u;
     fixed_seal_status = fixed_published_ready = c0_late_ack_ready = 1u;
+    late_wait_status = FM1_CPU1_WORKER_TIMEOUT; late_wait_calls = 0u;
     frames = BR_BLOCK;
     shape_claimed = shape_complete = fusion_complete = 1u;
     soft_status = wait_status = hard_status = FM1_CPU1_WORKER_OK;
@@ -276,6 +293,29 @@ int main(void)
 {
     const uint32_t deadline = 1000u;
     outcome_t o;
+    /* br_audio_c1_late_healthy (the real function, extracted): the late-healthy test the failure path uses to
+     * drop the block instead of resetting CPU1. */
+    reset(deadline);
+    fm1_cpu1_worker_mailbox.done_seq = 7u; fm1_cpu1_worker_mailbox.state = FM1_CPU1_WORKER_READY;
+    fm1_cpu1_worker_mailbox.result = BR_AUDIO_QUEUE_OK;
+    assert(br_audio_c1_late_healthy(7u));                         /* completed, normal result */
+    fm1_cpu1_worker_mailbox.result = BR_AUDIO_QUEUE_COMPLETE_LATE;
+    assert(br_audio_c1_late_healthy(7u));
+    fm1_cpu1_worker_mailbox.result = BR_AUDIO_QUEUE_FAILED;
+    assert(!br_audio_c1_late_healthy(7u));                        /* CPU1 itself reported failure */
+    fm1_cpu1_worker_mailbox.result = BR_AUDIO_QUEUE_OK;
+    fm1_cpu1_worker_mailbox.done_seq = 6u;
+    assert(!br_audio_c1_late_healthy(7u));                        /* not completed: a hang, reset stays */
+    fm1_cpu1_worker_mailbox.done_seq = 7u; fm1_cpu1_worker_mailbox.state = FM1_CPU1_WORKER_RUNNING;
+    assert(!br_audio_c1_late_healthy(7u));
+    fm1_cpu1_worker_mailbox.state = FM1_CPU1_WORKER_READY;
+    fm1_cpu1_worker_mailbox.task_context ^= 4u;
+    assert(!br_audio_c1_late_healthy(7u));                        /* not our job */
+    fm1_cpu1_worker_mailbox.task_context ^= 4u;
+    br_audio_source_worker_fault = 1u; assert(!br_audio_c1_late_healthy(7u)); br_audio_source_worker_fault = 0u;
+    fm1_cpu1_worker_fault = 1u; assert(!br_audio_c1_late_healthy(7u)); fm1_cpu1_worker_fault = 0u;
+    assert(!br_audio_c1_late_healthy(0u) && br_audio_c1_late_healthy(7u));
+    puts("PASS: late-healthy CPU1 test (completed and normal: drop, not reset; hung or failed: reset)");
 #if TEST_BLOCK != FM1_AUDIO_HALF_FRAMES
     /* Defensive control: even a wrongly enabled flag cannot turn a non-half
      * block into a joined full or partial release. */
@@ -287,7 +327,8 @@ int main(void)
     assert(!br_audio_partial_drop_count && !partial_cancel_calls);
     reset(deadline);
     o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
-    assert(!poll_calls && !hard_calls && wait_calls == 1u && last_wait_ticks == 91u);
+    /* the plain join wait with the fusion graph is the late wait: to the hang limit, no reset at the deadline */
+    assert(!poll_calls && !hard_calls && !wait_calls && late_wait_calls == 1u);
     assert(!o.late_accepted && !o.complete_watch);
     reset(deadline);
     o = run(BR_AUDIO_QUEUE_PUBLISHED_COMPLETE, 8u, 7u, deadline);
@@ -676,7 +717,19 @@ int main(void)
     reset(deadline); br_audio_source_queue.fixed_plan_active = 1u;
     soft_status = FM1_CPU1_WORKER_TIMEOUT; fixed_published_ready = 0u;
     o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
-    assert(!o.complete_watch && fault_path == 1u && !hard_calls);
+    assert(!o.complete_watch && fault_path == 1u && !hard_calls && late_wait_calls == 1u);   /* hang reached */
+    /* A late but healthy CPU1 (the fixed plan was not yet published at the soft cutoff): it is waited for,
+     * not given up on. Completed and validating: the block goes on; completed but not validating: the failure
+     * path is entered, where instrument_audio.c drops the block (br_audio_c1_late_healthy) instead of a reset. */
+    reset(deadline); br_audio_source_queue.fixed_plan_active = 1u;
+    soft_status = FM1_CPU1_WORKER_TIMEOUT; fixed_published_ready = 0u; late_wait_status = FM1_CPU1_WORKER_OK;
+    o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
+    assert(o.complete_watch && !fault_path && !hard_calls && late_wait_calls == 1u && o.worker_status == FM1_CPU1_WORKER_OK);
+    reset(deadline); br_audio_source_queue.fixed_plan_active = 1u;
+    soft_status = FM1_CPU1_WORKER_TIMEOUT; fixed_published_ready = 0u; late_wait_status = FM1_CPU1_WORKER_OK;
+    shape_complete = 0u;
+    o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
+    assert(!o.complete_watch && fault_path == 1u && o.worker_status == FM1_CPU1_WORKER_OK && fm1_cpu1_worker_mailbox.done_seq == 7u);
     reset(deadline); br_audio_source_queue.fixed_plan_active = 1u;
     soft_status = FM1_CPU1_WORKER_TIMEOUT; hard_status = FM1_CPU1_WORKER_TIMEOUT;
     o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
@@ -830,8 +883,10 @@ int main(void)
                 count, 7u, deadline);
         if (which == 3u)
             assert(poll_calls == 1u && !hard_calls && wait_calls == 1u);
+        else if (which == 1u)       /* no fusion graph: the legacy bounded wait, as before */
+            assert(!poll_calls && !hard_calls && wait_calls == 1u && last_wait_ticks == 91u && !late_wait_calls);
         else
-            assert(!poll_calls && !hard_calls && wait_calls == 1u && last_wait_ticks == 91u);
+            assert(!poll_calls && !hard_calls && !wait_calls && late_wait_calls == 1u);
         assert(!o.late_accepted);
     }
 
@@ -849,7 +904,7 @@ int main(void)
         hard_result = BR_AUDIO_QUEUE_COMPLETE_LATE;
         o = run(BR_AUDIO_QUEUE_OK, 8u, 7u, deadline);
         if (enabled)
-            assert(!poll_calls && !hard_calls && wait_calls == 1u && last_wait_ticks == 91u &&
+            assert(!poll_calls && !hard_calls && !wait_calls && late_wait_calls == 1u &&
                    !o.late_accepted);
         else
             assert(o.late_accepted && hard_calls == 1u);

@@ -199,6 +199,15 @@ static void br_arp_reset(void);
 #ifndef BR_AUDIO_PLAITS_APPEND_COST_PREDICTOR
 #define BR_AUDIO_PLAITS_APPEND_COST_PREDICTOR 0
 #endif
+#ifndef BR_IDLE_SKIP_COMP_KEY_CLEAR
+#define BR_IDLE_SKIP_COMP_KEY_CLEAR 1
+#endif
+#ifndef BR_IDLE_SKIP_FIXED_PLAN
+#define BR_IDLE_SKIP_FIXED_PLAN 1
+#endif
+#ifndef BR_IDLE_SKIP_KIT_LANES
+#define BR_IDLE_SKIP_KIT_LANES 1
+#endif
 #define BR_AUDIO_NATIVE_RENDER_MAX 32u
 #ifndef BR_AUDIO_POST_SKIP_UNUSED_SUM
 #define BR_AUDIO_POST_SKIP_UNUSED_SUM 1
@@ -1921,6 +1930,13 @@ BR_POLY_COLD static void br_snapshot_source_compressor(void)
     }
 }
 
+#ifndef BR_IDLE_SKIP_KIT_CONTROLS
+#define BR_IDLE_SKIP_KIT_CONTROLS 1
+#endif
+/* The kit source controls of a part are a pure function of the inputs listed in br_kit_controls_key, and
+ * br_audio_kit_source_controls[p] is written nowhere else: with equal inputs the stored result is the result. */
+typedef struct { uint32_t k[18]; uint32_t valid; } br_kit_controls_key_t;
+static br_kit_controls_key_t br_kit_controls_key[BR_PARTS];
 BR_POLY_COLD static void br_prepare_kit_source_controls(void)
 {
     uint32_t p, has_kit = 0u;
@@ -1932,6 +1948,21 @@ BR_POLY_COLD static void br_prepare_kit_source_controls(void)
         for (p = 0; p < BR_PARTS; ++p) {
             br_sound_t *sound = &br_effective_sound[p];
             sound->drum_key_lane = br_comp_source_drum_lane(br_source_compressor.source);
+            if (BR_IDLE_SKIP_KIT_CONTROLS && (br_mode[p] == 1u || br_mode[p] == 4u)) {
+                br_kit_controls_key_t now_key;
+                uint32_t lane;
+                for (lane = 0u; lane < BR_DRUM_LANES; ++lane) {
+                    now_key.k[lane] = br_cached_lane[p][lane];
+                    now_key.k[4u + lane] = br_cached_lane_gate[p][lane];
+                    now_key.k[13u + lane] = br_seq_lane_gate_frames[p][lane];
+                }
+                now_key.k[8] = sound->level; now_key.k[9] = sound->mute; now_key.k[10] = sound->preset;
+                now_key.k[11] = sound->gate; now_key.k[12] = quarter_frames; now_key.k[17] = br_mode[p];
+                now_key.valid = 1u;
+                if (br_kit_controls_key[p].valid && !memcmp(&br_kit_controls_key[p], &now_key, sizeof now_key))
+                    continue;
+                br_kit_controls_key[p] = now_key;
+            }
             if (br_mode[p] == 1u || br_mode[p] == 4u)
                 br_kit_source_controls_prepare(br_cached_lane[p],
                     br_cached_lane_gate[p], sound->level, sound->mute,
@@ -2365,14 +2396,67 @@ BR_COLD_SIZE static uint32_t br_note_waits(uint32_t i)
     return ahead > 0 && ahead <= (int32_t)(BR_NOTE_DELAY_TICKS + BR_NOTE_FRAMES_TICKS(2u * BR_BLOCK));
 }
 
+/* A hit on a kit lane whose level is zero (muted, excluded by solo, or turned to 0) makes no sound, but the part's amplitude envelope
+ * and its modulation sources are shared by all four lanes: restarting them for it restarts the attack of the lanes that are
+ * sounding (their tails dip and click). It must not touch them. 0 gives the old behaviour. */
+#ifndef BR_KIT_SILENT_LANE_NO_RETRIGGER
+#define BR_KIT_SILENT_LANE_NO_RETRIGGER 1
+#endif
+#ifdef BR_KIT_ENV_HOLD_PROBE
+static uint32_t br_kit_env_hold_probe;   /* host probe only (tests/probe_kit_release.c); compiled out otherwise */
+#endif
+static inline uint32_t br_kit_lane_silent(uint32_t p, uint32_t lane)
+{
+    return BR_KIT_SILENT_LANE_NO_RETRIGGER && lane < BR_DRUM_LANES && !br_cached_lane[p][lane];
+}
+
+/* A kit hit and the part's amplitude envelope. The envelope is shared by the four lanes and multiplies the whole kit sum; each lane's own
+ * voice shapes its hit. Restarting the attack on every hit (amp back to 0, a 32-sample ramp: a hole of about 0.7 ms) dips every lane that is
+ * still sounding. A hit while the envelope is open (attack, decay or sustain) keeps its level and stage and only takes the hit's note (the
+ * part still closes when the last hit's note is released) and velocity, and its gate timer where there is one. From OFF the envelope starts
+ * as before; from release it opens again from where it is. 0 gives the old behaviour. */
+#ifndef BR_KIT_ENV_NO_RESTART
+#define BR_KIT_ENV_NO_RESTART 1
+#endif
+/* 1: a note-off does not release the kit part envelope (see br_release_note). 0: as before.
+ * Off by default: the release on a key release is the drum track's own envelope release, a setting and a
+ * modulation target (tests/test_mod_target_audio.c); with 1 it would do nothing on live play. */
+#ifndef BR_KIT_ENV_NO_NOTE_OFF_RELEASE
+#define BR_KIT_ENV_NO_NOTE_OFF_RELEASE 0
+#endif
+BR_POLY_COLD static void br_kit_env_hit(uint32_t p, uint32_t note, uint32_t velocity, const br_sound_t *s)
+{
+    br_env_t *e = &br_env[p];
+    if (BR_KIT_ENV_NO_RESTART && e->stage != BR_ENV_OFF) {
+        if (e->stage != BR_ENV_RELEASE) {
+            e->note = note; e->velocity = br_bound(velocity, 127u);
+            e->lpg_gate_remaining = s->amp_mode ? br_lpg_gate_samples(s->lpg_gate) : 0u;
+            return;
+        }
+        br_env_start(p, note, velocity, s, 1u);
+        return;
+    }
+    br_env_start(p, note, velocity, s, 0u);
+}
+#ifdef BR_KIT_ENV_HOLD_PROBE
+/* host probe only: the same hit, then the part envelope forced fully open (no attack ramp) */
+BR_POLY_COLD static void br_kit_env_hit_probe(uint32_t p, uint32_t note, uint32_t velocity, const br_sound_t *s)
+{
+    br_kit_env_hit(p, note, velocity, s);
+    if (br_kit_env_hold_probe == 2u) { br_env_t *e = &br_env[p]; e->stage = BR_ENV_SUSTAIN; e->amp = 32767u; e->pos = 32767u << 16; }
+}
+#define br_kit_env_hit br_kit_env_hit_probe
+#endif
+
 BR_POLY_COLD static void br_start_note_now(uint32_t p, uint32_t note, uint32_t velocity, uint32_t slide)
 {
     br_sound_t *s = &br_effective_sound[p];
-    br_mod_note_on(&br_mod_state[p], &br_cached_mod[p], note, velocity);
+    uint32_t silent_lane = br_is_kit(s->preset) && br_kit_lane_silent(p, br_drum_lane(note));
+    if (!silent_lane) br_mod_note_on(&br_mod_state[p], &br_cached_mod[p], note, velocity);
     if (br_is_kit(s->preset)) {
         uint32_t lane = br_drum_lane(note);
         if (lane < BR_DRUM_LANES) br_seq_lane_gate_frames[p][lane] = 0u;
-        br_env_start(p, note, velocity, s, 0u);
+        if (!silent_lane) br_kit_env_hit(p, note, velocity, s);
 #if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
         if (s->preset == BR_KIT_PLAITS) {
 #if BR_AUDIO_FUSION_FOUR_WAY_KIT
@@ -2506,7 +2590,8 @@ BR_POLY_COLD static void br_start_note(uint32_t p, uint32_t note, uint32_t veloc
 {
     if (p < BR_SYNTH_PARTS && br_is_plaits(br_effective_sound[p].preset) &&
         (BR_AUDIO_STAGGER_WARM_SYNTH_STARTS ||
-         (br_env[p].stage == BR_ENV_OFF && plaits_quiet(br_dsp[p].plaits)))) {
+         (br_env[p].stage == BR_ENV_OFF && plaits_quiet_long(br_dsp[p].plaits)))) {
+        /* cold = today's window (plaits_quiet_long), not the shorter warm-keep table window */
         uint32_t at = br_start_next_free;
         if ((int32_t)(at - br_start_half) < 0) at = br_start_half;
         br_start_next_free = at + 1u;
@@ -2600,6 +2685,15 @@ BR_POLY_COLD static void br_release_note(uint32_t p, uint32_t note)
 #endif
         if (note >= 128u || note == br_mod_state[p].note) {
             br_mod_note_off(&br_mod_state[p]);
+#ifdef BR_KIT_ENV_HOLD_PROBE
+            if (br_kit_env_hold_probe) return;   /* host probe only: the part envelope stays open */
+#endif
+#if BR_KIT_ENV_NO_NOTE_OFF_RELEASE
+            /* An ordinary note-off must not fade the kit: the part envelope multiplies every lane, and the last-struck note's
+             * release would cut the tails of the lanes still ringing (a kick tapped short lost half its tail). The envelope
+             * closes by itself once every lane is quiet (end of the post stage); all-notes-off and stop still release it. */
+            if (note < 128u) return;
+#endif
             if (e->stage != BR_ENV_OFF && (note >= 128u || e->note == note)) {
                 e->stage = BR_ENV_RELEASE; e->release_start = e->amp;
             }
@@ -2700,6 +2794,9 @@ BR_POLY_COLD static void br_stop_part(uint32_t p)
             br_drum_all_off_mask(br_drum_pair_state(p, BR_KIT_LANES_A), BR_KIT_LANES_A);
             br_drum_all_off_mask(br_drum_pair_state(p, BR_KIT_LANES_B), BR_KIT_LANES_B);
         }
+#ifdef BR_KIT_ENV_HOLD_PROBE
+        if (!br_kit_env_hold_probe)   /* host probe only: the part envelope stays open */
+#endif
         if (br_env[p].stage != BR_ENV_OFF) {
             br_env[p].stage = BR_ENV_RELEASE;
             br_env[p].release_start = br_env[p].amp;
@@ -3330,9 +3427,11 @@ BR_POLY_COLD static void br_start_sequence_kit_voice(uint32_t p, uint32_t lane,
     int32_t pitched_note = (int32_t)note + pitch_delta;
     if (pitched_note < 0) pitched_note = 0;
     if (pitched_note > 127) pitched_note = 127;
-    br_mod_note_on(&br_mod_state[p], &br_cached_mod[p],
-                   (uint32_t)pitched_note, velocity);
-    br_env_start(p, (uint32_t)pitched_note, velocity, sound, 0u);
+    if (!br_kit_lane_silent(p, lane)) {
+        br_mod_note_on(&br_mod_state[p], &br_cached_mod[p],
+                       (uint32_t)pitched_note, velocity);
+        br_kit_env_hit(p, (uint32_t)pitched_note, velocity, sound);
+    }
 #if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
     if (sound->preset == BR_KIT_PLAITS) {
 #if BR_AUDIO_FUSION_FOUR_WAY_KIT
@@ -4490,7 +4589,7 @@ static int32_t br_poly_scheduler_post(uint32_t part, int32_t *row, uint32_t n)
      * every block, especially for the lowest-capacity models. */
     for (uint32_t i = 0; i < br_poly_scheduler.source.allocator.limit; ++i) {
         if (br_poly_scheduler.envelope[i].stage != BR_ENV_OFF ||
-            !plaits_quiet(br_poly_scheduler.source.storage.voice[i])) active = 1u;
+            !plaits_quiet_long(br_poly_scheduler.source.storage.voice[i])) active = 1u;
         if ((int32_t)(br_poly_scheduler.source.allocator.voice[i].age -
                       br_poly_scheduler.source.allocator.voice[newest].age) > 0) newest = i;
     }
@@ -4505,15 +4604,18 @@ static int32_t br_poly_scheduler_post(uint32_t part, int32_t *row, uint32_t n)
         uint32_t step = (target - br_poly_mix_gain_q15) / 16u;
         br_poly_mix_gain_q15 += step ? step : 1u;
     }
+    /* The filter's controls are constant over the block: scale and sum the input, then filter the row in one call
+     * (bit-identical to calling the per-sample filter inside the loop). */
     for (uint32_t i = 0; i < n; ++i) {
         int32_t sample = br_clip(br_filter_mul_q15(row[i], br_poly_mix_gain_q15), -32767, 32767);
         sum += sample;
-        if (!sound->filter_resonance && !sound->filter_keytrack)
-            row[i] = br_filter_process(&br_filter[part], sample, br_bound(sound->filter, 127u));
-        else row[i] = br_filter_process_controls(&br_filter[part], sample,
-                br_bound(sound->filter, 127u), br_bound(sound->filter_resonance, 127u),
-                sound->filter_keytrack, br_poly_scheduler.envelope[newest].note);
+        row[i] = sample;
     }
+    if (!sound->filter_resonance && !sound->filter_keytrack)
+        br_filter_block(&br_filter[part], row, n, br_bound(sound->filter, 127u), 0u);
+    else br_filter_block_controls(&br_filter[part], row, n,
+            br_bound(sound->filter, 127u), br_bound(sound->filter_resonance, 127u),
+            sound->filter_keytrack, br_poly_scheduler.envelope[newest].note);
     br_quiet_part[part] = !active && br_filter_quiet(&br_filter[part]);
     return n ? (int32_t)(sum / n) : 0;
 }
@@ -4694,6 +4796,14 @@ static void br_engine_source_part(uint32_t p, int32_t *output,
             }
             br_audio_plaits_current_append_profile[p][slot] = profile;
 #else
+            /* Nothing active, pending or fading in these lanes: every chunk call would only clear its
+             * slice of out and key (render_keyed_impl leaves a quiet lane's state untouched), so clear
+             * the whole rows once. BR_IDLE_SKIP_KIT_LANES is 1 unless a host test overrides it. */
+            if (BR_IDLE_SKIP_KIT_LANES &&
+                plaits_kit_quiet_mask(br_plaits_kit_job_state(p, lane_mask), lane_mask)) {
+                for (offset = 0u; offset < n; ++offset) output[offset] = 0;
+                if (key) for (offset = 0u; offset < n; ++offset) key[offset] = 0;
+            } else
             for (offset = 0u; offset < n; offset += BR_AUDIO_NATIVE_RENDER_MAX) {
                 uint32_t count = n - offset < BR_AUDIO_NATIVE_RENDER_MAX ?
                     n - offset : BR_AUDIO_NATIVE_RENDER_MAX;
@@ -4740,7 +4850,7 @@ static void br_engine_source_part(uint32_t p, int32_t *output,
 #endif
             if (e->stage != BR_ENV_OFF)
                 for (i = 0; i < n; ++i) output[i] = samples[i];
-        }
+        } else plaits_skip_frames(br_dsp[p].plaits, n);
     }
 #endif
 }
@@ -4857,6 +4967,9 @@ uint32_t br_audio_worker_sources(void *opaque_job)
     uint32_t stage_started = 0u;
 #endif
     if (!job || !job->output || job->part >= BR_PARTS || job->frames > BR_BLOCK) return 0u;
+    const uint32_t tj = BR_IDLE_JOB(job);
+    (void)tj;
+    BR_IDLE_STAMP(BR_TS_JSTART + tj);
 #if BR_AUDIO_FAILURE_JOB_PROFILE_DIAG
     job->failure_profile_start_tick = 0u;
     job->failure_profile_flags = 0u;
@@ -4904,6 +5017,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
             br_audio_call_fx_fusion_process_track(job->part, job->output,
                                                   job->frames);
         else br_audio_call_fx_shared_reverb(job->frames);
+        BR_IDLE_STAMP(BR_TS_JEND + tj);
 #if BR_AUDIO_FUSION_JOB_TIMING_DIAG
         br_audio_job_timing_job_end(job, timing_core, timing_started);
 #elif BR_AUDIO_FUSION_EWMA_SCHEDULER
@@ -4939,6 +5053,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
 #endif
         br_engine_source_part(job->part, job->output, job->key, job->frames,
                               job->lane_mask ? job->lane_mask : BR_DRUM_ALL_MASK);
+        BR_IDLE_STAMP(BR_TS_JSRC + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -4952,6 +5067,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
 #endif
         br_audio_fused_osc_block[job->part] = br_engine_post_part_row(
             job->part, job->output, br_comp_key[job->part], job->frames);
+        BR_IDLE_STAMP(BR_TS_JPOST + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -4971,6 +5087,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
         if (job->kind == BR_AUDIO_JOB_FUSED_TRACK)
             br_audio_call_fx_fusion_process_track(job->part, job->output,
                                                   job->frames);
+        BR_IDLE_STAMP(BR_TS_JEND + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -5060,6 +5177,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
             merged[i] = sample;
         }
         }
+        BR_IDLE_STAMP(BR_TS_JSRC + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -5078,6 +5196,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
 #endif
             br_audio_fused_osc_block[job->part] = br_engine_post_part_row(
                 job->part, job->output, br_comp_key[job->part], job->frames);
+        BR_IDLE_STAMP(BR_TS_JPOST + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -5096,6 +5215,7 @@ uint32_t br_audio_worker_sources(void *opaque_job)
 #endif
         br_audio_call_fx_fusion_process_track(job->part, job->output,
                                               job->frames);
+        BR_IDLE_STAMP(BR_TS_JEND + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
         if (job->failure_profile_stage_flags &
             BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -5138,6 +5258,8 @@ uint32_t br_audio_worker_sources(void *opaque_job)
 #endif
         br_engine_source_part(job->part, job->output, job->key, job->frames,
                               job->lane_mask ? job->lane_mask : BR_DRUM_ALL_MASK);
+    BR_IDLE_STAMP(BR_TS_JSRC + tj);
+    BR_IDLE_STAMP(BR_TS_JEND + tj);
 #if BR_AUDIO_FAILURE_JOB_STAGE_PROFILE_DIAG
     if (job->failure_profile_stage_flags &
         BR_AUDIO_FAILURE_STAGE_ACTIVE_VALID) {
@@ -6140,6 +6262,21 @@ static uint32_t br_audio_fixed_plan_prepare_eight_general(uint32_t count)
 #endif
 
     if (count != 8u) return 0u;
+#if BR_AUDIO_FUSION_ACTIVITY_EWMA
+    /* BR_IDLE_SKIP_FIXED_PLAN: a block whose jobs are all idle-class (the kit finalizer is always class 1, so it is
+     * left out of the test) is not planned: the function returns 0 at its very first line, the same value and the
+     * same unplanned state (fixed_plan_active stays 0: br_audio_fixed_plan_prepare called br_audio_fixed_plan_disable
+     * before this, and every other decline in this function returns before it sets anything) as each of its other
+     * early declines, and the block runs on the claim-once ready queue. Idle-class DTO costs are floored at 8 chunks
+     * x 1,024 ticks each (br_audio_fusion_apply_robust_floor), far above their ~1,000-2,000 tick hints that make the
+     * ready-queue estimate, so this planner declines such a block today anyway (ready queue <= span). */
+    if (BR_IDLE_SKIP_FIXED_PLAN) {
+        for (i = 0u; i < count; ++i)
+            if (br_audio_source_jobs[i].kind != BR_AUDIO_JOB_KIT_FINALIZE &&
+                br_audio_source_jobs[i].activity_class) break;
+        if (i == count) return 0u;
+    }
+#endif
     for (i = 0u; i < count; ++i) {
         const br_audio_source_job_t *job = &br_audio_source_jobs[i];
         if (job->part >= BR_PARTS || !job->frames ||
@@ -6859,6 +6996,42 @@ enum { BR_AUDIO_C1_PREFLIGHT_NONE = 0u, BR_AUDIO_C1_PREFLIGHT_CLAIMED = 1u,
 /* The soft wait has ended. Retry only a busy lock until the same absolute
  * hard cutoff used by the worker wait. At the first expired observation,
  * allow one final lock try only if this worker has already completed. */
+#if defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)
+/* CPU1 has accepted the source job and has not completed by the time the soft join (or the preflight)
+ * gives up. A late but healthy CPU1 must not be reset: wait for its completion up to the HANG limit
+ * (late_deadline + BR_AUDIO_C1_HANG_AFTER_DEADLINE_TICKS) with polls that never reset. OK means CPU1 completed
+ * (the matching done_seq was acquired; it owns nothing now). TIMEOUT at the hang limit leaves the
+ * reset to the common failure path below, which only resets a CPU1 that has still not completed. */
+static uint32_t br_audio_c1_late_wait(uint32_t sequence, uint32_t late_deadline, uint32_t *result)
+{
+    uint32_t status = fm1_cpu1_worker_poll_until(sequence, late_deadline, result);
+    if (status != FM1_CPU1_WORKER_OK && (int32_t)(br_audio_source_now() - late_deadline) >= 0)
+        status = fm1_cpu1_worker_poll_until(sequence,
+            late_deadline + BR_AUDIO_C1_HANG_AFTER_DEADLINE_TICKS, result);
+    if (status == FM1_CPU1_WORKER_OK) status = fm1_cpu1_worker_wait(sequence, 1u, result);
+    return status;
+}
+
+/* 1: CPU1 has completed this sequence's job, is idle, reported a normal result, and nothing has
+ * faulted: a late join that failed validation can be dropped like any partial drop, CPU1 stays. */
+static uint32_t br_audio_c1_late_healthy(uint32_t sequence)
+{
+    uint32_t result;
+    if (!sequence || fm1_cpu1_worker_fault || br_engine_pipeline_uncontained_fault_get() ||
+        br_audio_source_worker_fault || fm1_cpu1_worker_mailbox.cpu_id != 1u ||
+        fm1_cpu1_worker_mailbox.request_seq != sequence ||
+        fm1_cpu1_worker_mailbox.done_seq != sequence ||
+        fm1_cpu1_worker_mailbox.state != FM1_CPU1_WORKER_READY ||
+        fm1_cpu1_worker_mailbox.task_id != FM1_CPU1_WORKER_TASK_AUDIO_SOURCE_BATCH ||
+        fm1_cpu1_worker_mailbox.task_context != (uint32_t)(uintptr_t)&br_audio_source_queue)
+        return 0u;
+    FM1_CPU1_WORKER_BARRIER();
+    result = fm1_cpu1_worker_mailbox.result;
+    return result == BR_AUDIO_QUEUE_OK || result == BR_AUDIO_QUEUE_PUBLISHED_COMPLETE ||
+           result == BR_AUDIO_QUEUE_CUTOFF_DRAINED || result == BR_AUDIO_QUEUE_COMPLETE_LATE;
+}
+
+#endif
 static uint32_t br_audio_source_c1_late_preflight(
     int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n, uint32_t count,
     uint32_t deadline, uint32_t hard_deadline,
@@ -8000,6 +8173,15 @@ static uint32_t br_audio_fusion_modal_cold_floor(
 }
 #endif
 
+/* BR_IDLE_SKIP_HINT_HISTORY: the signature snapshot (br_audio_fusion_signature_snapshot) is read only by the history
+ * estimate (reached only for activity_class != 0, see below), by br_audio_fusion_history_commit (which skips a job with
+ * activity_class == 0, and a job whose snapshot is not valid, with the same `continue`) and by the fixed-8 DTO (only
+ * for activity_class != 0, `history_enabled`). So for an idle-class job it is dead work: the job signature (a hash of
+ * about ten words, and for a kit lane job a flash C++ call, plaits_kit_lane_scheduler_state) need not be computed;
+ * the snapshot is left invalid, which is how it already reads before it is computed. */
+#ifndef BR_IDLE_SKIP_HINT_HISTORY
+#define BR_IDLE_SKIP_HINT_HISTORY 1
+#endif
 static void br_audio_fusion_cost_hints(uint32_t count)
 {
     uint32_t i;
@@ -8018,9 +8200,15 @@ static void br_audio_fusion_cost_hints(uint32_t count)
     BR_AUDIO_FUSION_STAGE_ENABLE_SIGNATURE || \
     BR_AUDIO_FUSION_KEY_OUTPUT_SIGNATURE
         br_audio_fusion_signature_snapshot_valid[i] = 0u;
+#if BR_AUDIO_FUSION_ACTIVITY_EWMA
+        if (!BR_IDLE_SKIP_HINT_HISTORY || job->activity_class) {
+#endif
         br_audio_fusion_signature_snapshot[i] =
             br_audio_fusion_job_signature(job);
         br_audio_fusion_signature_snapshot_valid[i] = 1u;
+#if BR_AUDIO_FUSION_ACTIVITY_EWMA
+        }
+#endif
 #endif
 #if BR_AUDIO_FUSION_EWMA_SCHEDULER
         uint32_t whole_job_cost, affinity;
@@ -8325,17 +8513,16 @@ static int32_t br_engine_post_part_row(uint32_t p, int32_t *row,
         }
     }
     br_level_apply(p, row, (br_mode[p] == 1u || br_mode[p] == 4u) ? key : 0, n);
+    BR_IDLE_STAMP(BR_TS_FILT0 + p);
     if (!s->filter_resonance && !s->filter_keytrack) {
         br_filter[p].band = 0;
-        for (i = 0; i < n; ++i)
-            row[i] = br_filter_process(&br_filter[p], row[i],
-                                       br_bound(s->filter, 127u));
+        br_filter_block(&br_filter[p], row, n, br_bound(s->filter, 127u), 0u);
     } else {
-        for (i = 0; i < n; ++i)
-            row[i] = br_filter_process_controls(&br_filter[p], row[i],
-                br_bound(s->filter, 127u), br_bound(s->filter_resonance, 127u),
-                s->filter_keytrack, e->note);
+        br_filter_block_controls(&br_filter[p], row, n,
+            br_bound(s->filter, 127u), br_bound(s->filter_resonance, 127u),
+            s->filter_keytrack, e->note);
     }
+    BR_IDLE_STAMP(BR_TS_FILT1 + p);
     if ((br_mode[p] == 1u && br_drum_pair_quiet(p))
 #if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
         || (br_mode[p] == 4u && br_plaits_kit_pair_quiet(p))
@@ -8866,9 +9053,55 @@ BR_AUDIO_API void br_engine_post_join_finish(void)
 #endif
 }
 
+#if BR_IDLE_STAGE_TICKS && defined(FM1_DEVICE)
+volatile uint32_t br_idle_stamp[BR_IDLE_STAMPS];
+#endif
+/* The second br_build_effective pass of a block (after the events, arp and sequencer) is skipped for a part whose
+ * inputs are exactly those pass 1 used: br_mod_effective is a pure function of the modulation state, the amp, the
+ * cached config/sound/fx (changed only by br_snapshot, pass 1) and the global LFO it reads, and nothing between the
+ * passes writes br_effective_sound / br_effective_fx / br_pitch_mod_q7 / br_level_raw. Parts with modulation
+ * inactive already return at once from br_build_effective. Off for wheels (SMK-37: the foreground moves them) and
+ * with the polyphony scheduler (its own amp). BR_IDLE_SKIP_BUILD_PASS2=0 restores the second pass. */
+#ifndef BR_IDLE_SKIP_BUILD_PASS2
+#define BR_IDLE_SKIP_BUILD_PASS2 1
+#endif
+typedef struct {
+    br_mod_state_t state;
+    int32_t amp;
+    uint32_t wave, glfo_phase;
+    int32_t glfo_held;
+    uint32_t valid;
+} br_pass1_key_t;
+static br_pass1_key_t br_pass1_key[BR_PARTS];
+static void br_pass1_key_make(br_pass1_key_t *k, uint32_t p)
+{
+    k->state = br_mod_state[p];
+    k->amp = (int32_t)br_env[p].amp;
+    k->wave = br_master.global_lfo.wave;
+    k->glfo_phase = br_global_lfo_state.phase[0];
+    k->glfo_held = br_global_lfo_state.held[0];
+    k->valid = 1u;
+}
+static inline uint32_t br_pass2_skippable(uint32_t p)
+{
+#if BR_CAP_WHEELS && defined(FM1_DEVICE)
+    (void)p; return 0u;
+#else
+    br_pass1_key_t now_key;
+    if (!BR_IDLE_SKIP_BUILD_PASS2 || br_cached_mod_inactive[p] || !br_pass1_key[p].valid) return 0u;
+#if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
+    if (br_poly_scheduler_enabled) return 0u;
+#endif
+    br_pass1_key_make(&now_key, p);
+    return !memcmp(&now_key, &br_pass1_key[p], sizeof now_key);
+#endif
+}
+
 BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
 {
     uint32_t p, i;
+    BR_IDLE_STAMP(1);
+    BR_IDLE_CLEAR_ACC();
 #if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
     if (br_poly_scheduler_enabled && br_playing) {
         br_poly_scheduler_waiting = 1u;
@@ -8916,8 +9149,15 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     /* A contained C1 (held in reset) leaves CPU0 to render alone. */
     if (fm1_cpu1_worker_fault && !fm1_cpu1_worker_contained()) br_audio_source_worker_fault = 1u;
 #endif
-    for (p = 0; p < BR_PARTS; ++p)
-        for (i = 0; i < BR_BLOCK; ++i) br_comp_key[p][i] = 0;
+    /* br_comp_key rows are read only for a kit part (br_fx_job_kit) under an active compressor, and a kit part's
+     * row is overwritten in full by its finalizer (or the non-fused merge) before any reader runs, every block.
+     * Synth rows are never read. The per-block clear of all four rows is therefore dead work (reader audit:
+     * instrument_fx.c finish/silent checks, post_part_row key argument, finalize 5041/5060, merges 10145/10191).
+     * BR_IDLE_SKIP_COMP_KEY_CLEAR=0 restores it. */
+    if (!BR_IDLE_SKIP_COMP_KEY_CLEAR)
+        for (p = 0; p < BR_PARTS; ++p)
+            for (i = 0; i < BR_BLOCK; ++i) br_comp_key[p][i] = 0;
+    BR_IDLE_STAMP(2);
 #if defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)
     if (br_audio_source_worker_fault) {
         for (p = 0; p < BR_PARTS; ++p)
@@ -8946,7 +9186,12 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
 #endif
         br_select_mode(p);
         br_build_effective(p);
+        br_pass1_key[p].valid = 0u;
+#if !(BR_CAP_WHEELS && defined(FM1_DEVICE))
+        if (BR_IDLE_SKIP_BUILD_PASS2 && !br_cached_mod_inactive[p]) br_pass1_key_make(&br_pass1_key[p], p);
+#endif
     }
+    BR_IDLE_STAMP(3);
 #if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
     if (br_poly_scheduler_enabled && br_cached_sound[br_poly_scheduler_part].preset !=
             BR_FIRST_PLAITS + br_poly_scheduler.source.model) {
@@ -8989,6 +9234,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
         br_clock_experiment.phase_end_q16 = br_clock_experiment.phase_q16 +
             fm1_clock_div64((uint64_t)n << 32, br_clock_experiment.period_q16, 0);
 #endif
+    BR_IDLE_STAMP(4);
     if (!br_playing && br_transport_prev) {
         for (p = 0; p < BR_PARTS; ++p) br_stop_part(p);
         br_metro_frames = 0u;
@@ -9027,14 +9273,16 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     if (!br_poly_scheduler_enabled)
 #endif
     {
+        BR_IDLE_STAMP(5);
         for (p = 0; p < BR_SYNTH_PARTS; ++p) br_arp_process(p, n);
         for (p = 0; p < BR_PARTS; ++p) br_seq_process(p, n);
+        BR_IDLE_STAMP(6);
     }
 #if defined(BR_MIDI_CLOCK_EXPERIMENT) && BR_MIDI_CLOCK_EXPERIMENT
     if (br_clock_experiment.anchor.valid) br_clock_experiment.render_frame += n;
 #endif
     for (p = 0; p < BR_PARTS; ++p) {
-        br_build_effective(p);
+        if (!br_pass2_skippable(p)) br_build_effective(p);
 #if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
         if (!br_poly_scheduler_enabled)
 #endif
@@ -9046,6 +9294,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
 #endif
         br_model_mono_limit();
 #endif
+    BR_IDLE_STAMP(7);
     br_smooth_sends();
     /* LEVEL maps to (v/127)^2 first (br_level_law), then the existing 5 ms
      * slew runs on that gain: a common source level for the short fade and the
@@ -9058,6 +9307,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     }
     br_snapshot_source_compressor();
     br_prepare_kit_source_controls();
+    BR_IDLE_STAMP(8);
 #if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
     source_wall_start = fm1_ticks();
 #endif
@@ -9073,6 +9323,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     if (br_audio_source_fx_fusion_active &&
         !br_audio_call_fx_fusion_prepare(bus, n))
         br_audio_source_fx_fusion_active = 0u;
+    BR_IDLE_STAMP(9);
     if (br_audio_source_fx_fusion_active) {
 #if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT
         if (br_poly_scheduler_enabled) source_job_count = br_poly_scheduler_build_jobs(bus, n);
@@ -9080,6 +9331,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
 #endif
         {
             source_job_count = br_audio_build_fusion_jobs(bus, n);
+            BR_IDLE_STAMP(10);
             br_audio_fusion_cost_hints(source_job_count);
         }
     } else {
@@ -9281,6 +9533,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     }
 #endif
 #endif
+    BR_IDLE_STAMP(11);
     br_audio_source_publish();
 #if defined(BR_SOURCE_QUEUE_TEST)
     if (br_audio_source_test_parallel && BR_POLY_STANDARD_GRAPH &&
@@ -9582,6 +9835,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
             if (runtime_trace_chunk)
                 fm1_runtime_trace_mark(FM1_RUNTIME_TRACE_MARK_SUBMIT_BEGIN);
 #endif
+            BR_IDLE_STAMP(12);
             worker_status = fm1_cpu1_worker_submit_audio_batch(
                 context, &sequence);
             submitted = worker_status == FM1_CPU1_WORKER_OK;
@@ -9655,6 +9909,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                     br_audio_source_fx_fusion_active && !br_pipeline_enabled ?
                         &late_job : 0);
             }
+            BR_IDLE_STAMP(13);
             uint32_t join_timeout = br_audio_source_join_timeout_ticks();
 #if BR_AUDIO_RUNTIME_TRACE_ENABLED
             if (runtime_trace_chunk)
@@ -9720,7 +9975,9 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                          * the existing common failure path holds/resets it. */
                         if (c1_extended == BR_AUDIO_C1_PREFLIGHT_TERMINAL)
                             fm1_cpu1_worker_note_terminal_timeout(sequence);
-                        worker_status = FM1_CPU1_WORKER_TIMEOUT;
+                        worker_status = c1_extended == BR_AUDIO_C1_PREFLIGHT_INVALID ?
+                            br_audio_c1_late_wait(sequence, late_deadline, &worker_result) :
+                            FM1_CPU1_WORKER_TIMEOUT;
                     }
                 }
             } else {
@@ -9732,11 +9989,12 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                     !br_audio_source_queue.fixed_plan_active && br_audio_graph_count_ok(source_job_count)) {
                     if (fm1_cpu1_worker_fault ||
                         br_engine_pipeline_uncontained_fault_get() ||
-                        br_audio_source_worker_fault ||
-                        !br_audio_source_c0_late_ack_ready(
-                            bus, n, source_job_count, late_deadline,
-                            &fm1_cpu1_worker_mailbox, sequence, &late_job)) {
+                        br_audio_source_worker_fault) {
                         worker_status = FM1_CPU1_WORKER_TIMEOUT;
+                    } else if (!br_audio_source_c0_late_ack_ready(
+                                   bus, n, source_job_count, late_deadline,
+                                   &fm1_cpu1_worker_mailbox, sequence, &late_job)) {
+                        worker_status = br_audio_c1_late_wait(sequence, late_deadline, &worker_result);
                     } else {
                         worker_status = fm1_cpu1_worker_wait_until(
                             sequence, late_deadline + FM1_AUDIO_HALF_TICKS,
@@ -9771,7 +10029,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                                !br_audio_source_fixed_published_ready(
                                    n, source_job_count, late_deadline,
                                    &fm1_cpu1_worker_mailbox, sequence)) {
-                        worker_status = FM1_CPU1_WORKER_TIMEOUT;
+                        worker_status = br_audio_c1_late_wait(sequence, late_deadline, &worker_result);
                     } else {
                         worker_status = fm1_cpu1_worker_wait_until(
                             sequence, late_deadline + FM1_AUDIO_HALF_TICKS,
@@ -9780,10 +10038,14 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                 }
 #endif
                 else {
-                    worker_status = fm1_cpu1_worker_wait(sequence,
-                        join_timeout, &worker_result);
+                    /* With the fusion graph the budget is the hang limit, not the time to the deadline
+                     * (late_deadline is set only on that path); the legacy batches keep their own. */
+                    worker_status = br_audio_source_fx_fusion_active && late_deadline ?
+                        br_audio_c1_late_wait(sequence, late_deadline, &worker_result) :
+                        fm1_cpu1_worker_wait(sequence, join_timeout, &worker_result);
                 }
             }
+            BR_IDLE_STAMP(14);
 #if BR_AUDIO_RUNTIME_TRACE_ENABLED
             if (runtime_trace_chunk)
                 fm1_runtime_trace_mark(FM1_RUNTIME_TRACE_MARK_WAIT_END);
@@ -9947,6 +10209,16 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
                 uint32_t reset_request_tick;
 #endif
                 uint32_t reset_confirmed;
+                /* A late but healthy CPU1 (it completed its job, reported normally, nothing else is
+                 * wrong) is not a hang: drop this block like any partial drop (counted as a late drop)
+                 * and keep CPU1. Only a CPU1 that has not completed by the hang limit, or that failed,
+                 * reaches the reset below. */
+                if ((int32_t)(br_audio_source_now() - late_deadline) >= 0 &&
+                    br_audio_c1_late_healthy(sequence)) {
+                    br_audio_source_drop_partial(source_job_count, late_deadline, sequence,
+                                                 br_audio_source_now());
+                    return;
+                }
                 br_audio_source_worker_fault = 1u;
                 BR_AUDIO_FAULT_SITE(BR_AUDIO_FAULT_SOURCE_JOIN);
 #if BR_AUDIO_FAILURE_JOB_PROFILE_DIAG
@@ -10005,6 +10277,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
         return;
     }
 #endif
+    BR_IDLE_STAMP(15);
 #if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
     br_gap_stamp[0] = fm1_ticks();
 #endif
@@ -10172,6 +10445,7 @@ BR_AUDIO_API void br_engine_render(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n)
     br_post_join.n = n;
     for (p = 0; p < BR_PARTS; ++p) br_post_join.osc[p] = osc_block[p];
     br_post_join.pending = 1u;
+    BR_IDLE_STAMP(16);
 #else
     if (n) {
         int32_t sum = 0, mix;

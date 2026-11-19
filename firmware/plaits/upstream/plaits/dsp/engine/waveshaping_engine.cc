@@ -74,7 +74,7 @@ void WaveshapingEngine::Render(
   
   // Start from bandlimited slope signal.
   slope_.Render<OSCILLATOR_SHAPE_SLOPE>(f0, pw, out, size);
-  triangle_.Render<OSCILLATOR_SHAPE_SLOPE>(f0, 0.5f, aux, size);
+  triangle_.Render<OSCILLATOR_SHAPE_TRIANGLE>(f0, 0.5f, aux, size);
 
   // Try to estimate how rich the spectrum is, and reduce the range of the
   // waveshaping control accordingly.

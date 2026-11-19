@@ -160,13 +160,44 @@ static const uint32_t kQuietFrames = 3u * kOutputRate;
  * quiet period only keeps the engine state warm for the next note. Kick,
  * snare and hi-hat (engines 21-23) decay on their own and stop rendering
  * after 0.75 s instead of 3 s. */
-static inline uint32_t QuietFramesFor(uint32_t model) {
+/* FM1_PLAITS_WARM_KEEP_TABLE: how long an engine keeps rendering (output discarded) after its release, per
+ * model, in milliseconds. Measured on the host (tests/probe_plaits_warm.cc, 24 models x 3 parameter sets x 3 notes x
+ * same/other next note x windows 0 ms .. 3 s, the next note's first 2 s against today's window):
+ *  - models 1-5, 10, 13: the next note is sample for sample identical with a window of 0 (note-on resets all of
+ *    their state): 0 ms;
+ *  - models 11, 12: differences of a few LSB, no larger than the 3 s vs 12 s difference that today's window already
+ *    has: 64 ms;
+ *  - models 0, 6-9, 14, 16, 19, 20, 22, 23 carry free-running phase or noise that no window short of today's
+ *    reproduces sample for sample (even 3 s against 12 s differs); the level and the first 30 ms of the next note stay
+ *    within the same spread as that difference (same sound, another phase): 64 ms;
+ *  - models 15, 17, 18 show a real difference at short windows (a missing or changed attack, level) and model 21 (kick)
+ *    a level change: they keep today's window.
+ * 0 here is today's behaviour: set FM1_PLAITS_WARM_KEEP_TABLE to 0. */
+#ifndef FM1_PLAITS_WARM_KEEP_TABLE
+#define FM1_PLAITS_WARM_KEEP_TABLE 1
+#endif
+#if FM1_PLAITS_WARM_KEEP_TABLE
+static const uint16_t kQuietMs[24] = {
+    64, 0, 0, 0, 0, 0, 64, 64, 64, 64, 0, 64,
+    64, 0, 64, 3000, 64, 3000, 3000, 64, 64, 750, 64, 64};
+#endif
+static inline uint32_t QuietFramesLong(uint32_t model) {
 #if FM1_PLAITS_SHORT_PERCUSSIVE_QUIET
   if (model >= 21u && model <= 23u) return (3u * kOutputRate) / 4u;
 #else
   (void)model;
 #endif
   return kQuietFrames;
+}
+/* The monophonic track renders while its envelope is on regardless, so only the warm-keep window is the table's.
+ * A polyphonic voice has no such envelope here: its quiet state IS how long its release is rendered, so the
+ * voice paths use plaits_quiet_long (today's window). */
+static inline uint32_t QuietFramesFor(uint32_t model) {
+#if FM1_PLAITS_WARM_KEEP_TABLE
+  if (model < 24u) return static_cast<uint32_t>(
+      (static_cast<uint64_t>(kQuietMs[model]) * kOutputRate) / 1000u);
+#endif
+  return QuietFramesLong(model);
 }
 
 struct PlaitsState {
@@ -685,6 +716,24 @@ void plaits_all_off(void* state) {
       s->retrigger_low_pending;
   s->gate = 0u;
   if (was_active) s->quiet_frames = 0u;
+}
+
+uint32_t plaits_quiet_long(const void* state) {
+  if (!state) return 1u;
+  const PlaitsState* s = static_cast<const PlaitsState*>(state);
+  return !s->gate && s->quiet_frames >= QuietFramesLong(s->model);
+}
+
+/* A block of n frames that the caller did not render because plaits_quiet(): keep counting the time since the
+ * release, so that plaits_quiet_long (today's window; the cold-start stagger decision) elapses exactly when it
+ * would have with the engine rendering. */
+void plaits_skip_frames(void* state, uint32_t n) {
+  if (!state) return;
+  PlaitsState* s = static_cast<PlaitsState*>(state);
+  if (!s->gate) {
+    s->quiet_frames += n;
+    if (s->quiet_frames > kQuietFrames) s->quiet_frames = kQuietFrames;
+  }
 }
 
 uint32_t plaits_quiet(const void* state) {

@@ -3413,12 +3413,25 @@ static int32_t br_filter_snap_delta(int32_t turn)
 {
     return br_snap_delta((int32_t)br_master.fx.filter, turn);
 }
+/* The master filter cue is shown once, BR_FILTER_CUE_MS after the last change of the value (every new change
+ * starts the wait again), not at every detent: a message redraws the whole cue band at each turn, and the
+ * sweep was too heavy for the LCD link. The main loop calls br_filter_cue_tick. */
+#define BR_FILTER_CUE_MS 800u
+static void br_filter_cue_tick(void)
+{
+    char message[25], text[24];
+    if (!br_ui.filter_cue || (int32_t)(fm1_ms - br_ui.filter_cue_at) < 0) return;
+    br_ui.filter_cue = 0u;
+    br_filter_text(text, (int32_t)br_master.fx.filter);
+    br_text_copy(message, "MASTER FILTER ", sizeof message);
+    br_text_append(message, text, sizeof message);
+    br_message(message);
+}
 static void br_select_turn(int32_t turn)
 {
     int32_t old = (int32_t)br_master.fx.filter;
     int32_t value = br_clip(old + turn, 0, 127);
     uint32_t key = 4096u + br_ui.part;
-    char message[25], text[24];
     uint32_t snap = br_ui.page == BR_PAGE_MIX && br_ui.screen[BR_PAGE_MIX] == 1u &&
         br_ui.glo_pending && br_ui.glo_snap;
     if (value != old || snap) {
@@ -3429,10 +3442,7 @@ static void br_select_turn(int32_t turn)
         if (snap) ++br_master.fx.filter_snap_generation;
         RING_PUBLISH(); br_master.revision++;
     }
-    br_filter_text(text, value);
-    br_text_copy(message, "MASTER FILTER ", sizeof message);
-    br_text_append(message, text, sizeof message);
-    br_message(message);
+    if (value != old) { br_ui.filter_cue = 1u; br_ui.filter_cue_at = fm1_ms + BR_FILTER_CUE_MS; }
 }
 
 static void br_step_length_text(char *text, uint32_t length)
@@ -5385,6 +5395,7 @@ struct br_perform_view {
     br_control_t c[4];
     char value[4][24];
     uint32_t q[4], kind[4], variant[4], route[4], has_env[4], env[4][4], focus, p;
+    uint32_t chart_position, chart_resonance;           /* what the filter chart shows (br_chart_shown) */
 };
 static void br_perform_art(void)
 {
@@ -5395,7 +5406,7 @@ static void br_perform_art(void)
         hds_well(5,BR_PARAM_ICON_Y,111,62,6);             /* same 62-row height as the ENV chart */
         for(k=1u;k<4u;++k) hd_line(9+(int32_t)k*102/4,BR_PARAM_ICON_Y+5,9+(int32_t)k*102/4,BR_PARAM_ICON_Y+57,RGB(22,26,28));
         hd_line(9,BR_PARAM_ICON_Y+31,111,BR_PARAM_ICON_Y+31,RGB(22,26,28));
-        br_perform_filter_graph(4,BR_PARAM_ICON_Y,(uint32_t)v->c[0].value,(uint32_t)v->c[1].value);
+        br_perform_filter_graph(4,BR_PARAM_ICON_Y,v->chart_position,v->chart_resonance);
         for(k=2u;k<4u;++k)                                  /* the two right-hand controls are knobs */
             if (v->c[k].label[0])
                 br_widget_draw(v->kind[k],(int32_t)k*60,BR_PARAM_ICON_Y,60,v->q[k],v->variant[k],v->has_env[k]?v->env[k]:0,0u);
@@ -5409,6 +5420,25 @@ static void br_perform_art(void)
         br_draw_param_text(center, BR_PARAM_VALUE_Y, v->value[k], v->c[k].label, BR_DIM);
         if(v->route[k]) br_draw_route_badges(center,98,v->route[k],v->p,BR_BACKGROUND);
     }
+}
+/* The filter chart is the dearest picture on the LCD link (about 15 kB, a whole 120 x 62 well), so while its
+ * knob keeps turning it is redrawn at most every BR_CHART_MS (8 times a second); the value text under the knob
+ * follows every frame. It shows the values of its last redraw (br_chart_shown) until the interval is over and
+ * then jumps to the current ones: when the knob stops, the final picture is drawn within one interval. A forced
+ * or unsliced draw (a new layout, br_draw, tests) and another page or track always show the current values. */
+#define BR_CHART_MS 125u
+static struct { uint32_t at; uint16_t ctx; uint8_t position, resonance; } br_chart_shown;
+static void br_chart_values(struct br_perform_view *v, uint32_t force)
+{
+    uint32_t position = (uint32_t)v->c[0].value, resonance = (uint32_t)v->c[1].value;
+    uint16_t ctx = (uint16_t)(((br_ui.page * 16u + br_ui.screen[br_ui.page]) * 8u + v->p) | 0x8000u);
+    if ((position != br_chart_shown.position || resonance != br_chart_shown.resonance) &&
+        (force || !br_pass.on || ctx != br_chart_shown.ctx || fm1_ms - br_chart_shown.at >= BR_CHART_MS)) {
+        br_chart_shown.position = (uint8_t)position; br_chart_shown.resonance = (uint8_t)resonance;
+        br_chart_shown.at = fm1_ms;
+    }
+    br_chart_shown.ctx = ctx;
+    v->chart_position = br_chart_shown.position; v->chart_resonance = br_chart_shown.resonance;
 }
 static void br_draw_perform(uint32_t force)
 {
@@ -5435,7 +5465,8 @@ static void br_draw_perform(uint32_t force)
         hash[8u+k]=((br_ui_accent*131u+v.q[k])*31u+v.kind[k])*31u+v.variant[k];   /* the picture */
         if(v.has_env[k]) for(uint32_t i=0;i<4u;++i) hash[8u+k]=hash[8u+k]*131u+v.env[k][i];
     }
-    for(k=0;k<2u;++k) hash[8u+k]=((br_ui_accent*131u+(uint32_t)v.c[0].value)*131u+(uint32_t)v.c[1].value)*3u+k;   /* (the graph) */
+    br_chart_values(&v,force);
+    for(k=0;k<2u;++k) hash[8u+k]=((br_ui_accent*131u+v.chart_position)*131u+v.chart_resonance)*3u+k;   /* (the graph) */
     br_draw_page_route_badge(force,p); /* global filter also clears the track badge when switching directly */
     br_view=&v; br_art=br_perform_art;
     for(uint32_t r=0;r<12u;++r) {   /* per 60-px column: value and badges first, then the knob badge, the picture */
@@ -7140,7 +7171,6 @@ static void br_draw_body(void)
 {
     static uint32_t card_old[4][2], comp_old;
     static uint8_t card_next[4][2], cards_done;
-    static uint32_t background_part = 0xffffffffu;
     static uint8_t compressor_visible, dots_visible, snap_cue_visible;
     uint32_t k, h, force = 0u, p = br_ui.part;
     int32_t battery_level;
@@ -7167,7 +7197,7 @@ static void br_draw_body(void)
     if (br_ui.page == BR_PAGE_PS) layout = 12u;
 #endif
     uint32_t geometry_changed = br_draw_layout_old != layout;
-    uint32_t layout_changed = geometry_changed || background_part != p;
+    uint32_t layout_changed = geometry_changed;   /* (a change of track repaints what depends on it, by the regions' hashes) */
     if (br_draw_layout_old == 0xffffffffu) br_top_epoch += 0x9e3779b9u;   /* the whole screen, the top too */
     char text[64], number[16];
     const char *name = br_header_title();
@@ -7214,7 +7244,7 @@ static void br_draw_body(void)
         uint32_t snap = br_fx_sends_page(), snap_left = snap_cue_visible && !snap;
         uint32_t comp_change = compressor_visible != compressor;
         if (layout_changed || snap_left || dots != dots_visible || comp_change) {
-            uint32_t sig = br_draw_layout_old << 16 ^ layout << 10 ^ background_part << 6 ^ p << 4 ^ snap_left << 3 ^
+            uint32_t sig = br_draw_layout_old << 16 ^ layout << 10 ^ p << 4 ^ snap_left << 3 ^
                            dots << 2 ^ dots_visible << 1 ^ compressor ^ compressor_visible << 20;
             if (sig != br_wipe.sig) {
                 br_wipe.sig = sig; br_wipe.done = 0u;
@@ -7246,7 +7276,7 @@ static void br_draw_body(void)
             br_wipe.on = 0u;
             if (br_wipe.done < br_wipe.ord) { br_ui.redraw = 0; return; }   /* the rest of the wipes: next pass */
             if (dots && (!dots_visible || geometry_changed)) br_dots_old = 0xffffffffu;
-            br_draw_layout_old = layout; background_part = p; snap_cue_visible = (uint8_t)snap;
+            br_draw_layout_old = layout; snap_cue_visible = (uint8_t)snap;
             dots_visible = (uint8_t)dots; compressor_visible = (uint8_t)compressor; br_wipe.sig = 0xffffffffu;
         }
     }

@@ -55,87 +55,86 @@ class GrainletOscillator {
     carrier_bleed_ = 0.0f;
   }
   
-  void Render(
+  // Both synchronized formants use the same carrier and modulation ramps.
+  void RenderPair(
+      GrainletOscillator& other,
       float carrier_frequency,
       float formant_frequency,
+      float other_formant_frequency,
       float carrier_shape,
       float carrier_bleed,
       float* out,
+      float* aux,
       size_t size) {
-    if (carrier_frequency >= kMaxFrequency * 0.5f) {
-      carrier_frequency = kMaxFrequency * 0.5f;
-    }
-    if (formant_frequency >= kMaxFrequency) {
-      formant_frequency = kMaxFrequency;
-    }
-    
-    stmlib::ParameterInterpolator carrier_frequency_modulation(
-        &carrier_frequency_,
-        carrier_frequency,
-        size);
-    stmlib::ParameterInterpolator formant_frequency_modulation(
-        &formant_frequency_,
-        formant_frequency,
-        size);
-    stmlib::ParameterInterpolator carrier_shape_modulation(
-        &carrier_shape_,
-        carrier_shape,
-        size);
-    stmlib::ParameterInterpolator carrier_bleed_modulation(
-        &carrier_bleed_,
-        carrier_bleed,
-        size);
+    {
+      const float max_carrier_frequency = kMaxFrequency * 0.5f;
+      stmlib::ParameterInterpolator carrier_frequency_modulation(
+          &carrier_frequency_, std::min(carrier_frequency, max_carrier_frequency), size);
+      stmlib::ParameterInterpolator formant_frequency_modulation(
+          &formant_frequency_, std::min(formant_frequency, kMaxFrequency), size);
+      stmlib::ParameterInterpolator other_frequency_modulation(
+          &other.formant_frequency_, std::min(other_formant_frequency, kMaxFrequency), size);
+      stmlib::ParameterInterpolator shape_modulation(&carrier_shape_, carrier_shape, size);
+      stmlib::ParameterInterpolator bleed_modulation(&carrier_bleed_, carrier_bleed, size);
 
-    float next_sample = next_sample_;
-    
-    while (size--) {
-      bool reset = false;
-      float reset_time = 0.0f;
-
-      float this_sample = next_sample;
-      next_sample = 0.0f;
-    
-      const float f0 = carrier_frequency_modulation.Next();
-      const float f1 = formant_frequency_modulation.Next();
-    
-      carrier_phase_ += f0;
-      reset = carrier_phase_ >= 1.0f;
-      
-      if (reset) {
-        carrier_phase_ -= 1.0f;
-        reset_time = carrier_phase_ / f0;
-        float before = Grainlet(
-            1.0f,
-            formant_phase_ + (1.0f - reset_time) * f1,
-            carrier_shape_modulation.subsample(1.0f - reset_time),
-            carrier_bleed_modulation.subsample(1.0f - reset_time));
-
-        float after = Grainlet(
-            0.0f,
-            0.0f,
-            carrier_shape_modulation.subsample(1.0f),
-            carrier_bleed_modulation.subsample(1.0f));
-
-        float discontinuity = after - before;
-        this_sample += discontinuity * stmlib::ThisBlepSample(reset_time);
-        next_sample += discontinuity * stmlib::NextBlepSample(reset_time);
-        formant_phase_ = reset_time * f1;
-      } else {
-        formant_phase_ += f1;
-        if (formant_phase_ >= 1.0f) {
-          formant_phase_ -= 1.0f;
+      float phase = carrier_phase_;
+      float formant = formant_phase_;
+      float other_formant = other.formant_phase_;
+      float next = next_sample_;
+      float other_next = other.next_sample_;
+      while (size--) {
+        float sample = next;
+        float other_sample = other_next;
+        next = 0.0f;
+        other_next = 0.0f;
+        const float f0 = carrier_frequency_modulation.Next();
+        const float f1 = formant_frequency_modulation.Next();
+        const float f2 = other_frequency_modulation.Next();
+        phase += f0;
+        if (phase >= 1.0f) {
+          phase -= 1.0f;
+          const float t = phase / f0;
+          const float u = 1.0f - t;
+          const float before_carrier = Carrier(1.0f, shape_modulation.subsample(u));
+          const float before_bleed = bleed_modulation.subsample(u);
+          const float before = Grainlet(before_carrier, formant + u * f1, before_bleed);
+          const float other_before = Grainlet(before_carrier, other_formant + u * f2, before_bleed);
+          const float after = Grainlet(Carrier(0.0f, shape_modulation.subsample(1.0f)),
+                                      0.0f, bleed_modulation.subsample(1.0f));
+          const float step = after - before;
+          const float other_step = after - other_before;
+          const float blep = stmlib::ThisBlepSample(t);
+          const float next_blep = stmlib::NextBlepSample(t);
+          sample += step * blep;
+          other_sample += other_step * blep;
+          next += step * next_blep;
+          other_next += other_step * next_blep;
+          formant = t * f1;
+          other_formant = t * f2;
+        } else {
+          formant += f1;
+          if (formant >= 1.0f) formant -= 1.0f;
+          other_formant += f2;
+          if (other_formant >= 1.0f) other_formant -= 1.0f;
         }
+        const float carrier = Carrier(phase, shape_modulation.Next());
+        const float bleed = bleed_modulation.Next();
+        next += Grainlet(carrier, formant, bleed);
+        other_next += Grainlet(carrier, other_formant, bleed);
+        *out++ = sample;
+        *aux++ = other_sample;
       }
-      
-      next_sample += Grainlet(
-          carrier_phase_,
-          formant_phase_,
-          carrier_shape_modulation.Next(),
-          carrier_bleed_modulation.Next());
-      *out++ = this_sample;
+      carrier_phase_ = phase;
+      formant_phase_ = formant;
+      other.formant_phase_ = other_formant;
+      next_sample_ = next;
+      other.next_sample_ = other_next;
     }
-    
-    next_sample_ = next_sample;
+    // Keep both oscillators' state consistent through block boundaries.
+    other.carrier_phase_ = carrier_phase_;
+    other.carrier_frequency_ = carrier_frequency_;
+    other.carrier_shape_ = carrier_shape_;
+    other.carrier_bleed_ = carrier_bleed_;
   }
 
  private:
@@ -166,14 +165,8 @@ class GrainletOscillator {
     return (Sine(phase) + 1.0f) * 0.25f;
   }
 
-  inline float Grainlet(
-      float carrier_phase,
-      float formant_phase,
-      float shape,
-      float bleed) {
-    float carrier = Carrier(carrier_phase, shape);
-    float formant = Sine(formant_phase);
-    return carrier * (formant + bleed) / (1.0f + bleed);
+  inline float Grainlet(float carrier, float formant_phase, float bleed) {
+    return carrier * (Sine(formant_phase) + bleed) / (1.0f + bleed);
   }
 
   // Oscillator state.

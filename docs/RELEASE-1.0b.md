@@ -1,6 +1,6 @@
 # JamesOS 1.0b
 
-**Build 3083, 17 November 2026.** This is the source at the `v1.0b` tag. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
+**Build 3110, 19 November 2026.** This is the source at the `v1.0b-build-3110` tag. Build 3083 of 17 November 2026 was the first 1.0b release, at the `v1.0b` tag; [Changes in build 3110](#changes-in-build-3110) lists what is different. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
 
 JamesOS is an independent firmware project by Aaron Grando (a.k.a. James Os) and Gjelly for the M-VAVE FM-1. It builds a second product, JamesOS-K, for the M-VAVE SMK-37 Pro, from the same source tree. This page lists what changed since 1.0a build 2108 (9 November 2026), what changes for existing users, what is known to be wrong, and what has and has not been checked.
 
@@ -10,14 +10,44 @@ Firmware switching can overwrite another firmware's saved data. Back up saved wo
 
 | Product | Device | Identity | Update loader | App package SHA-256 | Size |
 | --- | --- | --- | --- | --- | --- |
-| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673083` | `ota-FM-1_904` | `4ffe02d6cdceed126a5e2c3457df46105306976eafbb82e148e5a3252e5fa5e7` | 610,554 B |
-| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653083` | `ota-SMK-37 Pro_9260001` | `fd31046bcdd28634916e9e07a0ee1ed9c07a0a6d28f17edef32bc2381f08c120` | 651,472 B |
-| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673083` | `ota-FM-1_015` | `1d7ad1331f9e2b1020d402c749c73ee6e92e9ce50e4966f8063277f837f039aa` | 623,125 B |
+| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673110` | `ota-FM-1_904` | `296d307337a87e151b9bd18e004e0fbf44b06ebb43d18f8db78ea3e0cf848539` | 610,554 B |
+| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653110` | `ota-SMK-37 Pro_9260001` | `264fe98f8f9300a884a389a2f0fa9f8794069e2003e3b7151f4bef6359eba58d` | 651,472 B |
+| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673110` | `ota-FM-1_015` | `b26565d55a4bc9849b358e325234dec2c27db5748bb6332a07d0e0095462ad4c` | 623,125 B |
 | Source archive | | | | published beside the archive | |
 
 The loader identifiers are the ones each package reports while it updates.
 
 Each package is built with `tools/build.py` and the flags in the README. The exact command for the final build is recorded in `BUILD-REPRODUCIBILITY.txt` in its source archive. Both update packages rebuild byte for byte from that source archive with the same toolchain and SDK.
+
+## Changes in build 3110
+
+Build 3110 installs over build 3083. Projects, sounds and settings carry over.
+
+Fixes:
+
+- A late block of audio no longer costs the second processor core. Before, one wait that reached its deadline held that core in reset until the next restart, and a busy project then ran over its deadline on every block. A late block is now waited for and counted as one overrun.
+- A hit on a silent kit lane (muted, excluded by solo, or at level zero) no longer restarts the kit's shared envelope and modulation, which made a click on drums that were still ringing.
+- A kit hit while the kit's envelope is open no longer restarts it from zero. Every hit used to dip the whole kit for 32 samples.
+
+Processor load:
+
+- The global low-pass keeps its block path while its controls move.
+- The track ladder and high-pass loops use fewer instructions per sample, and a silent track with a settled filter skips them.
+- When nothing sounds, quiet kit lanes, silent track buffers, the compressor key buffers, the open-filter clamp, the kit control setup, the second settings pass, the master stage hand-off and the job planner are skipped or reused where the result is provably the same.
+- Plaits engines stop rendering sooner after a note ends, by a per-engine window, and effect tails end when their delay lines are empty. The stagger of cold starts keeps its timing.
+- The hi-hat, analog snare, phase distortion, modal, string, particle, grain, speech, oscillator, wavetable, six-operator FM, chip chord, wavefolder and wave terrain code does less repeated work for the same output.
+- The shared reverb core drops a few instructions per line.
+
+Screen:
+
+- The message for the global filter is shown once, 0.8 seconds after the knob stops, and the filter chart is redrawn at most eight times a second.
+- A change of selected track repaints only the regions that depend on it.
+- Per-pixel blending uses three multiplies where it used six.
+
+Sound:
+
+- Kit material differs where one drum plays over another, because the envelope dip is gone.
+- With the shorter render window, a note played after a rest can start from a different oscillator phase on engines whose phase runs free. Level and tone are unchanged.
 
 ## What is new since 1.0a
 
@@ -112,16 +142,16 @@ These come from a host audit of the sequencer and clock code. None is a regressi
 
 ## Memory budgets
 
-Measured on build 3082. Build 3083 is expected to be within a few hundred bytes. Limits come from `tools/build.py` and `firmware/product.h`.
+Build 3110. Limits come from `tools/build.py` and `firmware/product.h`.
 
 | Budget | FM-1 used | FM-1 limit | SMK-37 Pro used | SMK-37 Pro limit |
 | --- | --- | --- | --- | --- |
-| Application image | 497,072 B | 581,564 B | 509,228 B | 619,520 B |
-| `.data` + `.bss` | 84,848 B | 98,304 B | 85,776 B | 98,304 B |
-| Designated pool | 342,960 B | 344,064 B | 343,344 B | 344,064 B |
-| RAM code | 31,328 B | 32,512 B | 32,076 B | 32,512 B |
+| Application image | 513,184 B | 581,564 B | 526,036 B | 619,520 B |
+| `.data` + `.bss` | 85,568 B | 98,304 B | 86,112 B | 98,304 B |
+| Designated pool | 342,984 B | 344,064 B | 343,368 B | 344,064 B |
+| RAM code | 31,436 B | 32,512 B | 32,188 B | 32,512 B |
 
-The pool and RAM-code margins are small on both products (1,104 B and 1,184 B on the FM-1, 720 B and 436 B on the SMK-37 Pro). Final 3083 figures: FM-1 image 497,104 B of 581,564, data and BSS 84,848 of 98,304, pool 342,960 of 344,064, RAM code 31,328 of 32,512. SMK-37 Pro image 509,772 B of 619,520, data and BSS 85,776 of 98,304, pool 343,344 of 344,064, RAM code 32,076 of 32,512.
+The pool and RAM-code margins are small on both products (1,080 B and 1,076 B on the FM-1, 696 B and 324 B on the SMK-37 Pro).
 
 ## Where the claims were checked
 

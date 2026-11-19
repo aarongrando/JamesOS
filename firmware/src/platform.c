@@ -25,6 +25,7 @@
  * (fm1_enc_take); the 27 note keys are fm1_in.notes bit 0 (F3) .. 26 (G5), LED id 14 + key */
 #include "audio_level.h"
 #include "audio_deadline.h"
+#include "idle_stage_ticks.h"
 #include "master_gain_control.h"
 #include "instrument_pipeline_policy.h"
 #include "../hal/fm1_audio_block.h"
@@ -177,6 +178,7 @@ static void fm1_runtime_irq_profile_snapshot(uint32_t out[7])
 static uint32_t platform_audio_render_half(int32_t *out, uint32_t frames)
 {
     uint32_t i, offset, result;
+    BR_IDLE_STAMP(0);
     if (br_engine_pipeline_uncontained_fault_get())
         return FM1_AUDIO_RENDER_UNCONTAINED;
     for (i = 0u; i < 2u * frames; ++i) out[i] = 0;
@@ -199,7 +201,9 @@ static uint32_t platform_audio_render_half(int32_t *out, uint32_t frames)
             platform_audio_block_done(out + 2u * offset, count);
         }
     }
-    for (i = 0u; i < 2u * frames; ++i) out[i] <<= 7;
+    if (!BR_IDLE_OUT_ZERO() || frames > BR_AUDIO_BLOCK_FRAMES)   /* a zero buffer shifts to itself */
+        for (i = 0u; i < 2u * frames; ++i) out[i] <<= 7;
+    BR_IDLE_STAMP(21);
     return FM1_AUDIO_RENDER_OK;
 }
 enum { BTN_OCT_DOWN = 0, BTN_OCT_UP = 1, BTN_FX = 2, BTN_SEL = 3, BTN_ENV = 4, BTN_LFO = 5, BTN_EDIT = 6,
@@ -1165,7 +1169,8 @@ static void platform_audio_block_done(int32_t *out, uint32_t n)
     if (br_fx_output_prescaled) br_fx_output_prescaled = 0u;   /* CPU1 applied the same gain */
     else
 #endif
-    fm1_scale_q12_clip_block(out, 2u * n, &master_q12);
+    if (!BR_IDLE_OUT_ZERO())                          /* all-zero output (br_fx_finish_block): the gain changes nothing */
+        fm1_scale_q12_clip_block(out, 2u * n, &master_q12);
 #if FELUCCA_UAC
     uac_tap(out, n);
 #endif
@@ -1223,6 +1228,43 @@ static void fm1_audio_metrics_snapshot(uint32_t out[FM1_AUDIO_METRICS_WORDS])
     out[9] = fm1_audio_metrics.overruns_boot;
     irq_restore(irq);
 }
+
+#if BR_IDLE_STAGE_TICKS && defined(FM1_DEVICE)
+/* Per-stage ticks of one half (diagnostic 0xB9); layout in the 0xB9 comment of instrument_diagnostic.c.
+ * Chain stage i (0..20) is the span from stamp i to stamp i+1 (stamps 0..21, in execution order on CPU0).
+ * Words 21..23 are the whole window (stamp 21 - stamp 0), the CPU1 stream-job pickup latency (stamp 22 - 18,
+ * 0 when no stream job ran) and the CPU1 pre hook + master begin_block (23 - 22). Written by the audio IRQ
+ * only, once per completed half; only averages are kept, plus the worst whole window. */
+#define BR_IDLE_WORDS 24u
+static volatile uint32_t br_idle_avg_q6[BR_IDLE_WORDS], br_idle_window_max, br_idle_blocks;
+static void br_idle_stage_finish(void)
+{
+    uint32_t s[BR_IDLE_CHAIN], d[BR_IDLE_WORDS], i;
+    for (i = 0u; i < BR_IDLE_CHAIN; ++i) s[i] = br_idle_stamp[i];
+    br_idle_stamp[22] = br_idle_stamp[23] = 0u;                 /* CPU1 marks: valid only if a stream job set them */
+    for (i = 0u; i < 21u; ++i) d[i] = s[i + 1u] - s[i];
+    d[21] = s[21] - s[0];
+    d[22] = s[22] ? s[22] - s[18] : 0u;
+    d[23] = s[22] && s[23] ? s[23] - s[22] : 0u;
+    for (i = 0u; i < BR_IDLE_WORDS; ++i) br_idle_avg_q6[i] += d[i] - (br_idle_avg_q6[i] >> 6);
+    if (d[21] > br_idle_window_max) br_idle_window_max = d[21];
+    ++br_idle_blocks;
+}
+/* out: 24 averages (ticks), worst whole window, halves counted. */
+static void br_idle_stage_snapshot(uint32_t out[26])
+{
+    uint32_t irq = irq_save(), i;
+    for (i = 0u; i < BR_IDLE_WORDS; ++i) out[i] = br_idle_avg_q6[i] >> 6;
+    out[24] = br_idle_window_max;
+    out[25] = br_idle_blocks;
+    irq_restore(irq);
+}
+static void br_idle_stage_reset(void)
+{
+    uint32_t i;
+    br_idle_window_max = 0u;
+}
+#endif
 
 #if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
 /* Read-only UAC endpoint and ring snapshot for private diagnostic command 0x8A.
@@ -1300,6 +1342,9 @@ static void fm1_audio_metrics_reset(void)
     fm1_audio_late_over_one_half = 0u;
     fm1_audio_late_over_two_halves = 0u;
     fm1_audio_late_resync_skips = 0u;
+#if BR_IDLE_STAGE_TICKS && defined(FM1_DEVICE)
+    br_idle_stage_reset();
+#endif
 #if defined(BR_SPLIT_AUDIO)
     br_audio_late_drop_reset();
 #endif
@@ -1411,6 +1456,19 @@ void fm1_alnk0_irq(void)                       /* via isr_alnk0 (hal/fm1_isr.S) 
             ++fm1_audio_metrics.blocks;
             fm1_audio_metrics.load_q6 = load + render_ticks - (load >> FM1_AUDIO_LOAD_SHIFT);
         }
+#if BR_IDLE_STAGE_TICKS && defined(FM1_DEVICE)
+        if (render_result == FM1_AUDIO_RENDER_OK) {
+#if BR_AUDIO_TRACE
+            /* before br_idle_stage_finish: it clears the CPU1 stream stamps the record reads */
+#if BR_UI_TIMING_DIAG
+            (void)br_audio_trace_commit(fm1_audio_metrics.blocks, render_ticks, br_uit.c[BR_UIT_BYTES], br_uit.c[BR_UIT_LCD_TICKS]);
+#else
+            (void)br_audio_trace_commit(fm1_audio_metrics.blocks, render_ticks, 0u, 0u);
+#endif
+#endif
+            br_idle_stage_finish();
+        }
+#endif
         if (render_result == FM1_AUDIO_RENDER_DROP_LATE ||
             render_result == FM1_AUDIO_RENDER_CONTAINED_FAULT) {
             if (render_result == FM1_AUDIO_RENDER_DROP_LATE) {

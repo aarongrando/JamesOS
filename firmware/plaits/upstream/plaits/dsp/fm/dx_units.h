@@ -46,6 +46,10 @@ extern const float lut_amp_mod_sensitivity[4];
 extern const float lut_pitch_mod_sensitivity[8];
 extern const float lut_coarse[32];
 
+constexpr float Pow2Fraction2(float x) {
+  return 1.0f + x * (0.6565f + x * 0.3435f);
+}
+
 // Computes 2^x by using a polynomial approximation of 2^frac(x) and directly
 // incrementing the exponent of the IEEE 754 representation of the result
 // by int(x). Depending on the use case, the order of the polynomial
@@ -72,7 +76,7 @@ inline float Pow2Fast(float x) {
   if (order == 1) {
     r.f = 1.0f + x;
   } else if (order == 2) {
-    r.f = 1.0f + x * (0.6565f + x * 0.3435f);
+    r.f = Pow2Fraction2(x);
   } else if (order == 3) {
     r.f = 1.0f + x * (0.6958f + x * (0.2251f + x * 0.0791f));
   }

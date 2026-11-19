@@ -66,6 +66,9 @@ static uint32_t app_audio(int32_t *out, uint32_t frames)
     return app_result;
 }
 
+#define BR_IDLE_STAMP(i) ((void)0)       /* the stage stamps are device-only */
+#define BR_IDLE_OUT_ZERO() 0u            /* the zero-output shortcut is device-only */
+#define BR_IDLE_OUT_ZERO_CLEAR() ((void)0)
 #include "overrun_counters.inc"
 #include "overrun_irq.inc"
 

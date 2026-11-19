@@ -66,8 +66,8 @@ void GrainEngine::Render(
   const float carrier_shape = 0.33f + (parameters.morph - 0.33f) * \
       max(1.0f - f0 * 24.0f, 0.0f);
   
-  grainlet_[0].Render(f0, f1, carrier_shape, carrier_bleed_fixed, out, size);
-  grainlet_[1].Render(f0, f1 * ratio, carrier_shape, carrier_bleed_fixed, aux, size);
+  grainlet_[0].RenderPair(grainlet_[1], f0, f1, f1 * ratio,
+                         carrier_shape, carrier_bleed_fixed, out, aux, size);
   dc_blocker_[0].set_f<FREQUENCY_DIRTY>(0.3f * f0);
   for (size_t i = 0; i < size; ++i) {
     out[i] = dc_blocker_[0].Process<FILTER_MODE_HIGH_PASS>(out[i] + aux[i]);

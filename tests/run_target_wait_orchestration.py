@@ -41,6 +41,7 @@ helpers = ["static uint32_t br_audio_source_late_join_valid(",
            "static uint32_t br_audio_source_c1_late_read(",
            "static uint32_t br_audio_source_accept_complete_late(",
            "static uint32_t br_audio_source_complete_watch_valid(",
+           "static uint32_t br_audio_c1_late_healthy(",
            "static void br_audio_source_drop_partial("]
 selector_from = source.index("uint32_t join_timeout = br_audio_source_join_timeout_ticks();")
 selector, position = block("if (BR_AUDIO_C1_LATE_OWNER_KNOWN && BR_AUDIO_FUSION_ONLY_BUILD &&",

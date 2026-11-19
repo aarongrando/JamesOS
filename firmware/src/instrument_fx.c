@@ -259,6 +259,28 @@
 #ifndef BR_FX_FINISH_MASTER_STREAM
 #define BR_FX_FINISH_MASTER_STREAM 1
 #endif
+/* Split the master low-pass across the two cores: while CPU1 (the stream job) filters channel 0 of each 16-frame slice,
+ * CPU0 filters channel 1 of the slice behind it instead of waiting. Only when the pre-pass conditions hold; 0 compiles
+ * to the code without it. */
+/* Off by default: measured on the unit it lost about 3,500 ticks a block. Unsplit, the master stage already runs
+ * beside CPU0's mix (CPU1 about 12,100 ticks from the submit, both channels and the later stages 8,300 of it);
+ * split, the per-slice hand-offs cost more than the 2,500 ticks an ideal balance could win. */
+#ifndef BR_MASTER_SPLIT_CORES
+#define BR_MASTER_SPLIT_CORES 0
+#endif
+/* CPU0 also filters channel 1 inside its mix loop, after each slice it publishes (one call in RAM code, about 46 bytes):
+ * FM-1 only; the SMK-37 has no RAM code to spare and keeps channel 1 after the mix loop. */
+#ifndef BR_MASTER_SPLIT_EARLY_CH1
+#if defined(BR_PRODUCT) && defined(BR_PRODUCT_ID_SMK37) && BR_PRODUCT == BR_PRODUCT_ID_SMK37
+#define BR_MASTER_SPLIT_EARLY_CH1 0
+#else
+#define BR_MASTER_SPLIT_EARLY_CH1 1
+#endif
+#endif
+#if BR_MASTER_SPLIT_CORES && !BR_FX_FINISH_MASTER_STREAM
+#undef BR_MASTER_SPLIT_CORES
+#define BR_MASTER_SPLIT_CORES 0
+#endif
 #if BR_FX_FINISH_MASTER_STREAM != 0 && BR_FX_FINISH_MASTER_STREAM != 1
 #error "BR_FX_FINISH_MASTER_STREAM must be 0 or 1"
 #endif
@@ -573,6 +595,7 @@ typedef struct {
     int32_t glitch_hold;
     uint32_t tail_samples;
     uint32_t tail_storage;
+    uint32_t tail_check;                 /* BR_FX_TAIL_EARLY_END: silent blocks since the last emptiness check */
     uint32_t previous_delay_wet, previous_mod_mix;
 #if BR_FX_DELAY_RATE2
     uint32_t delay_rate2_phase, delay_rate2_history_pos;
@@ -636,6 +659,9 @@ typedef struct {
     /* Master low-pass: the track filter's four-pole ladder, one per channel.
      * Both channels see the same control sequence, so their mixes match. */
     br_filter_t ladder[2];
+    /* Set only inside br_master_fx_process_range, while the frames of the range have already been through
+     * br_master_ladder_block: the frame function then takes them as filtered. Zero otherwise. */
+    uint32_t ladder_pre;
 #endif
 } br_master_state_t;
 
@@ -790,6 +816,13 @@ static int32_t br_fx_track_stereo[BR_PARTS][BR_BLOCK][2] BR_POOL;
 /* A track job that took the silent-skip path records the current block's
  * sequence, so the finish stage knows that row is all zero without a scan. */
 static uint32_t br_fx_block_seq, br_fx_track_silent_seq[BR_PARTS];
+/* A track that took the silent skip no longer zero-fills its br_fx_track_stereo rows; its rows are stale and
+ * br_fx_track_silent_seq[p] == br_fx_block_seq says so. Every reader of the rows either checks that
+ * (br_fx_finish_inputs_silent), skips (the track's own pan ramp) or calls br_fx_materialize_silent_rows
+ * first (the meter capture and the per-frame mix loop of br_fx_finish_block). */
+#ifndef BR_IDLE_SKIP_SILENT_ROWS
+#define BR_IDLE_SKIP_SILENT_ROWS 1
+#endif
 static volatile uint32_t br_gr_separate_seq = 0xffffffffu; /* block whose reverb is its own job */
 #if BR_FX_GLOBAL_REVERB
 /* One reverb for all tracks (instrument_reverb2.c). Each track job leaves its send
@@ -843,6 +876,9 @@ static volatile uint32_t br_gr_cost_ticks;
 #endif
 #endif
 #if defined(FM1_DEVICE)
+#if BR_IDLE_SKIP_STREAM_ON
+volatile uint32_t br_fx_out_zero;   /* set by br_fx_finish_block when this half's output is provably all zero */
+#endif
 volatile int32_t br_fx_output_gain_q12 = 4096;
 volatile uint32_t br_fx_output_scale_request, br_fx_output_prescaled;
 #endif
@@ -856,6 +892,15 @@ typedef struct {
     uint32_t scale;              /* C1 also applies the final Q12 output gain */
     int32_t gain_q12;
     void (*pre)(void);           /* next-block bookkeeping, run before slice 0 */
+#if BR_MASTER_SPLIT_CORES
+    /* Master low-pass split (br_master_split_*): split_state is written by C1 only (0 undecided, 1 not split, 2 split),
+     * scanned_frames by C1 only (frames whose unfiltered values C1 has read: C0 may then change channel 1 of them),
+     * ch1_frames by C0 only (frames whose channel 1 C0 has filtered). The control snapshot is written by C1 before
+     * it publishes split_state and is read-only afterwards. */
+    volatile uint32_t split_state, scanned_frames, ch1_frames;
+    uint32_t split_ctl[5];       /* stable, filter, resonance at the block's start, cached filter, cached resonance */
+    uint32_t post_frames;        /* C1 only: frames whose post stages (frame function, filter skipped) have run */
+#endif
 } br_fx_finish_stream_job_t;
 static br_fx_finish_stream_job_t br_fx_finish_stream_job BR_POOL;
 /* Work counters for diagnostic 0x9b: master section time on CPU1 and shared-reverb time. */
@@ -2159,13 +2204,186 @@ br_master_ladder_frame(const int32_t *input, int32_t *filtered, int32_t peak)
         filtered[ch] = y;
     }
 }
+#ifdef BR_MASTER_LADDER_BLOCK_TEST_SWITCH
+/* Host test only: lets the equivalence test run the same input with the block path off and on. */
+static uint32_t br_master_ladder_block_enable = 1u, br_master_ladder_block_hits, br_master_ladder_block_mono_hits, br_master_ladder_block_unstable_hits;
+#endif
+/* The same low-pass for the `n` frames of a range at once, in place, when the whole range is in the steady state:
+ * controls settled for the block (so filter and resonance cannot move in the frame function), the low-pass fully in
+ * on both channels and not restarting, and the 2 s tail far enough from its FS/4 fade that no frame of the range can
+ * reach it. Returns 1 when the range has been filtered (the frame function then skips the filter) and 0, with nothing
+ * touched, otherwise. Per frame it is exactly what br_master_ladder_frame does with fade off: the tail bookkeeping
+ * from the unfiltered peak, the idempotent state resets, and per channel the ladder on the headroom-shifted input
+ * with only the wet difference scaled back. The channels' filters are independent, so each channel runs through
+ * br_filter_block in chunks of 16 frames. When every frame of the range has L == R and the two channels' filters are
+ * identical in every field (br_filter_t has no padding: 15 words and four bytes), both channels would compute the same
+ * thing, so one runs and its output and final state are copied to the other: exact by construction. Runs from flash,
+ * like br_master_ladder_frame. */
+/* The master filter and resonance control are slewed one step per frame toward br_master_cached by the frame function
+ * whenever the block's controls are not stable (a glide of the global filter makes every block of the glide unstable,
+ * though the slew itself lasts only a few frames). This is the value after `steps` such steps, from `cur`. */
+static uint32_t br_master_slew_n(uint32_t cur, uint32_t target, uint32_t steps)
+{
+    if (cur < target) return target - cur > steps ? cur + steps : target;
+    if (cur > target) return cur - target > steps ? cur - steps : target;
+    return cur;
+}
+
+#if BR_MASTER_SPLIT_CORES
+/* Controls as a block of frames sees them: whether the block's controls are stable, and the filter and resonance of the
+ * master state at the start (f0, r0) and the cached targets the frame function slews toward (ft, rt). */
+typedef struct { uint32_t stable, f0, r0, ft, rt; } br_master_ctl_t;
+
+/* One channel of the range through the low-pass ladder, in place, in chunks of 16 frames (the part of
+ * br_master_ladder_block that is per channel; the split-core path calls it for one channel per core). With stable
+ * controls the filter and resonance are constant. Without, the ladder only reads its control at a coefficient tick,
+ * which is frame (ladder_tick - 1) of the chunk, so the control the frame function would hold at that frame (the slew
+ * simulated from the state `off` frames before the range) is passed for the chunk; the other frames of a low-pass
+ * chunk do not depend on it. The caller guarantees filter and target below 63. */
+static void br_master_ladder_channel(int32_t *stereo, uint32_t n, uint32_t ch, uint32_t fit, uint32_t mono,
+                                     const br_master_ctl_t *k, uint32_t off)
+{
+    br_filter_t *f = &br_master_state.ladder[ch];
+    uint32_t base;
+    int32_t tmp[16];
+    for (base = 0u; base < n; base += 16u) {
+        uint32_t c = n - base < 16u ? n - base : 16u, j, cf = k->f0, cr = k->r0;
+        int32_t *frame = &stereo[2u * base + ch];
+        if (!k->stable) {
+            uint32_t e = (uint32_t)f->ladder_tick - 1u;
+            if (e < c) {
+                cf = br_master_slew_n(k->f0, k->ft, off + base + e + 1u);
+                cr = br_master_slew_n(k->r0, k->rt, off + base + e + 1u);
+            }
+        }
+        if (fit) for (j = 0u; j < c; ++j) tmp[j] = frame[2u * j] >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+        else for (j = 0u; j < c; ++j) {
+            int32_t x = frame[2u * j] >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+            if (x > 262144) x = 262144;
+            if (x < -262144) x = -262144;
+            tmp[j] = x;
+        }
+        br_filter_block(f, tmp, c, cf, cr);
+        if (fit) for (j = 0u; j < c; ++j) {
+            int32_t in = frame[2u * j];
+            frame[2u * j] = in + (int32_t)((uint32_t)(tmp[j] - (in >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT)) << BR_FX_MASTER_LADDER_HEADROOM_SHIFT);
+            if (mono) frame[2u * j + 1u] = frame[2u * j];
+        } else for (j = 0u; j < c; ++j) {
+            int32_t in = frame[2u * j], x = in >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+            if (x > 262144) x = 262144;
+            if (x < -262144) x = -262144;
+            frame[2u * j] = in + (int32_t)((uint32_t)(tmp[j] - x) << BR_FX_MASTER_LADDER_HEADROOM_SHIFT);
+            if (mono) frame[2u * j + 1u] = frame[2u * j];
+        }
+    }
+}
+
+#else
+/* One channel of the range through the low-pass ladder, in place, in chunks of 16 frames (the part of
+ * br_master_ladder_block that is per channel; the split-core path calls it for one channel per core). With stable
+ * controls the filter and resonance are constant. Without, the ladder only reads its control at a coefficient tick,
+ * which is frame (ladder_tick - 1) of the chunk, so the control the frame function would hold at that frame (the slew
+ * simulated from the state at the start of the range) is passed for the chunk; the other frames of a low-pass chunk
+ * do not depend on it. The caller guarantees filter and target below 63. */
+static void br_master_ladder_channel(int32_t *stereo, uint32_t n, uint32_t ch, uint32_t fit, uint32_t mono)
+{
+    br_filter_t *f = &br_master_state.ladder[ch];
+    uint32_t stable = br_master_state.controls_stable, f0 = br_master_state.filter, r0 = br_master_state.resonance;
+    uint32_t base;
+    int32_t tmp[16];
+    for (base = 0u; base < n; base += 16u) {
+        uint32_t c = n - base < 16u ? n - base : 16u, j, cf = f0, cr = r0;
+        int32_t *frame = &stereo[2u * base + ch];
+        if (!stable) {
+            uint32_t e = (uint32_t)f->ladder_tick - 1u;
+            if (e < c) {
+                cf = br_master_slew_n(f0, br_master_cached.filter, base + e + 1u);
+                cr = br_master_slew_n(r0, br_master_cached.resonance, base + e + 1u);
+            }
+        }
+        if (fit) for (j = 0u; j < c; ++j) tmp[j] = frame[2u * j] >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+        else for (j = 0u; j < c; ++j) {
+            int32_t x = frame[2u * j] >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+            if (x > 262144) x = 262144;
+            if (x < -262144) x = -262144;
+            tmp[j] = x;
+        }
+        br_filter_block(f, tmp, c, cf, cr);
+        if (fit) for (j = 0u; j < c; ++j) {
+            int32_t in = frame[2u * j];
+            frame[2u * j] = in + (int32_t)((uint32_t)(tmp[j] - (in >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT)) << BR_FX_MASTER_LADDER_HEADROOM_SHIFT);
+            if (mono) frame[2u * j + 1u] = frame[2u * j];
+        } else for (j = 0u; j < c; ++j) {
+            int32_t in = frame[2u * j], x = in >> BR_FX_MASTER_LADDER_HEADROOM_SHIFT;
+            if (x > 262144) x = 262144;
+            if (x < -262144) x = -262144;
+            frame[2u * j] = in + (int32_t)((uint32_t)(tmp[j] - x) << BR_FX_MASTER_LADDER_HEADROOM_SHIFT);
+            if (mono) frame[2u * j + 1u] = frame[2u * j];
+        }
+    }
+}
+
+#endif
+static __attribute__((noinline)) uint32_t br_master_ladder_block(int32_t *stereo, uint32_t n)
+{
+    br_filter_t *ladder = br_master_state.ladder;
+    uint32_t filter = br_master_state.filter, tail = br_master_state.filter_tail, i, ch, mono = 1u, fit = 0u;
+    if (!n || filter >= 63u || (!br_master_state.controls_stable && br_master_cached.filter >= 63u) ||
+        ladder[0].mix != 32767 || ladder[1].mix != 32767 || !ladder[0].ladder_tick || !ladder[1].ladder_tick ||
+        tail < FS / 4u + n)
+        return 0u;
+#ifdef BR_MASTER_LADDER_BLOCK_TEST_SWITCH
+    if (!br_master_ladder_block_enable) return 0u;
+    ++br_master_ladder_block_hits;
+    if (!br_master_state.controls_stable) ++br_master_ladder_block_unstable_hits;
+#endif
+    for (i = 0u; i < n; ++i) {
+        int32_t a = stereo[2u * i], b = stereo[2u * i + 1u], peak;
+        mono &= a == b;
+        fit |= (uint32_t)a + 524288u; fit |= (uint32_t)b + 524288u;
+        peak = a < 0 ? -a : a;
+        if ((b < 0 ? -b : b) > peak) peak = b < 0 ? -b : b;
+        if (peak > 2) tail = FS * 2u;
+        else if (tail) --tail;
+    }
+    br_master_state.filter_tail = tail;
+    /* Every sample in [-2^19, 2^19): the headroom-shifted input is inside +-262144 and its clamp is a no-op. */
+    fit = fit < 1048576u && BR_FX_MASTER_LADDER_HEADROOM_SHIFT >= 1;
+    mono = mono && !memcmp(&ladder[0], &ladder[1], sizeof ladder[0]);
+#ifdef BR_MASTER_LADDER_BLOCK_TEST_SWITCH
+    if (mono) ++br_master_ladder_block_mono_hits;
+#endif
+    br_master_state.low[0] = br_master_state.low[1] = 0;
+    br_master_state.svf_low[0] = br_master_state.svf_low[1] = 0;
+    br_master_state.band[0] = br_master_state.band[1] = 0;
+    br_master_state.hp2_low[0] = br_master_state.hp2_low[1] = 0;
+    br_master_state.hp2_band[0] = br_master_state.hp2_band[1] = 0;
+#if BR_MASTER_SPLIT_CORES
+    {
+        br_master_ctl_t k;
+        k.stable = br_master_state.controls_stable; k.f0 = filter; k.r0 = br_master_state.resonance;
+        k.ft = br_master_cached.filter; k.rt = br_master_cached.resonance;
+        for (ch = 0u; ch < (mono ? 1u : 2u); ++ch)
+            br_master_ladder_channel(stereo, n, ch, fit, mono, &k, 0u);
+    }
+#else
+    for (ch = 0u; ch < (mono ? 1u : 2u); ++ch)
+        br_master_ladder_channel(stereo, n, ch, fit, mono);
+#endif
+    if (mono) ladder[1] = ladder[0];
+    return 1u;
+}
 #if defined(FM1_DEVICE) && !defined(FX_FAULT_TEST)
 /* RAM -> XIP flash: pi32v2 needs an absolute indirect call. */
+#define BR_MASTER_LADDER_BLOCK_INVOKE(...) \
+    ({ __typeof__(&br_master_ladder_block) volatile ladder_block_fn_ = &br_master_ladder_block; \
+       ladder_block_fn_(__VA_ARGS__); })
 #define BR_MASTER_LADDER_INVOKE(...) \
     ({ __typeof__(&br_master_ladder_frame) volatile ladder_fn_ = &br_master_ladder_frame; \
        ladder_fn_(__VA_ARGS__); })
 #else
 #define BR_MASTER_LADDER_INVOKE(...) br_master_ladder_frame(__VA_ARGS__)
+#define BR_MASTER_LADDER_BLOCK_INVOKE(...) br_master_ladder_block(__VA_ARGS__)
 #endif
 #endif
 
@@ -2238,7 +2456,9 @@ static BR_FX_RAM_AUDIO void br_master_fx_process_frame(int32_t *stereo)
     peak = br_fx_abs(input[0]);
     if (br_fx_abs(input[1]) > peak) peak = br_fx_abs(input[1]);
 #if BR_FILTER_LADDER
-    if (filter < 63u || br_master_state.ladder[0].mix)
+    if (br_master_state.ladder_pre) { /* already low-passed by br_master_ladder_block */
+        filtered[0] = input[0]; filtered[1] = input[1];
+    } else if (filter < 63u || br_master_state.ladder[0].mix)
         BR_MASTER_LADDER_INVOKE(input, filtered, peak);
     else
 #endif
@@ -2422,8 +2642,17 @@ br_master_fx_process_range(int32_t *stereo, uint32_t first, uint32_t end)
         if (!any) return;
     }
 #endif
+#if BR_FILTER_LADDER
+#if BR_MASTER_SPLIT_CORES
+    if (br_master_state.ladder_pre != 2u) /* 2: both channels were filtered by br_master_split_* */
+#endif
+    br_master_state.ladder_pre = BR_MASTER_LADDER_BLOCK_INVOKE(&stereo[2u * first], end - first);
+#endif
     for (i = first; i < end; ++i)
         br_master_fx_process_frame(&stereo[2u * i]);
+#if BR_FILTER_LADDER
+    br_master_state.ladder_pre = 0u;
+#endif
 }
 #endif
 
@@ -3143,9 +3372,57 @@ br_fx_prepare_track_controls(uint32_t p, const br_sound_t *s,
         }
 }
 
+/* BR_FX_TAIL_EARLY_END (default 1; 0 = the fixed tail): end a track's tail as soon as nothing more can come out of it.
+ * The delay stage re-arms tail_samples to delay_tail_hold (about 3.5 s) in every block in which delay_ring != 0, and
+ * delay_ring is exactly "a whole line length of zero writes since the last nonzero one" (any nonzero write re-arms it
+ * to the line length, br_fx_stage_delay_block / the rate-2 stage), so delay_ring == 0 means the delay line holds only
+ * zeros and its echo is zero; the hold that follows is a fixed margin. Checked at the start of a block (br_fx_prepare_block, flash,
+ * nothing else is running then), every 8 blocks, for a track whose tail is running:
+ *   - the delay line is provably empty (delay_ring == 0) and no output crossfade is pending (delay_output_xfade_left);
+ *   - the modulation stage, when it is on (mod_mix), holds only zeros in its line (a scan of br_mod_line), has no
+ *     feedback sample in flight (mod_feedback_last == 0) and its filter states are within +-2 (sub-LSB).
+ * (The input is not tested: with the lines provably empty an arriving input has nothing to meet. At a natural end, new
+ * input clears the storage through the clear-on-next-input path, tail_storage stays set here too.)
+ * Then tail_samples is set to 0 (the state a natural end leaves) and the free-running LFO phase, which the rest of the
+ * tail would have advanced by tail_samples * mod_lfo_inc, is advanced by that closed form. What can differ from the
+ * natural end: residual sub-LSB state of the delay's loop filters and half-band history (abandoned at a natural end
+ * too, cleared by the next input), the TAPE delay's own wow and flutter phases (they advance per frame during the
+ * rest of the tail; not advanced here), the fade of that residual in the last 0.25 s. Flash code, no RAM growth. */
+#ifndef BR_FX_TAIL_EARLY_END
+#define BR_FX_TAIL_EARLY_END 1
+#endif
+#define BR_FX_TAIL_CHECK_BLOCKS 8u
+static BR_FX_PREPARE_CODE void br_fx_tail_early_end(uint32_t p)
+{
+    br_fx_track_t *st = &br_fx_track[p];
+    const br_fx_config_t *cfg = br_fx_config_at(p);
+    const br_fx_controls_t *c = &br_fx_controls[p];
+    uint32_t i;
+    if (++st->tail_check < BR_FX_TAIL_CHECK_BLOCKS) return;
+    st->tail_check = 0u;
+#if BR_FX_DELAY_RATE2
+    if (st->delay_ring || st->delay_output_xfade_left) return;
+#else
+    return;
+#endif
+    if (cfg->mod_mix) {
+        const uint32_t *line = (const uint32_t *)br_mod_line[p];
+        if (st->mod_feedback_last) return;
+        for (i = 0u; i < 4u; ++i)
+            if (st->phase_state[i] > 2 || st->phase_state[i] < -2) return;
+        for (i = 0u; i < sizeof br_mod_line[p] / 4u; ++i)
+            if (line[i]) return;
+    }
+    st->lfo_phase += st->tail_samples * c->mod_lfo_inc;
+    st->tail_samples = 0u;
+}
+
 static BR_FX_PREPARE_CODE void br_fx_prepare_block(uint32_t n)
 {
     uint32_t p, i, bpm = br_bpm;
+    if (BR_FX_TAIL_EARLY_END && n)
+        for (p = 0u; p < BR_PARTS; ++p)
+            if (br_fx_track[p].tail_samples) br_fx_tail_early_end(p);
 #if BR_AUDIO_FUSION_ONLY_BUILD
     BR_FX_PREPARE_INVOKE(br_comp_snapshot,
                          br_source_compressor_revision != 0xffffffffu ?
@@ -4700,6 +4977,9 @@ static BR_FX_RAM_AUDIO __attribute__((noinline)) void br_gr_job(uint32_t n)
     br_gr_stats[5] = br_gr_key[0]; br_gr_stats[6] = br_gr_key[1]; br_gr_stats[7] = br_gr_key[2];
 #endif
 #if defined(FM1_DEVICE)
+#if BR_IDLE_STAGE_TICKS
+    { uint32_t trace_lap = started; BR_IDLE_LAP(BR_TS_ACC_GRJOB, trace_lap); }
+#endif
     started = fm1_ticks() - started;
 #if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
     br_fx_gr_work_ticks += started;
@@ -4725,8 +5005,231 @@ static BR_FX_RAM_AUDIO void br_gr_add_range(int32_t *out, uint32_t base, uint32_
 }
 #endif /* BR_FX_GLOBAL_REVERB */
 
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER
+/* ---- Master low-pass split across the cores -------------------------------------------------------------------
+ * Per 16-frame slice: C1 (the stream job) adds the shared reverb return to channel 0, reads the unfiltered frames to
+ * do the tail bookkeeping (it needs both channels' peak, so it reads channel 1 plus the reverb return without writing
+ * them), publishes scanned_frames, filters channel 0, waits for C0's channel 1, then runs the frame function over the
+ * slice with the filter skipped (ladder_pre = 2). C0, once its mix loop has published every slice, follows C1's
+ * scanned_frames: for each slice it adds the reverb return to channel 1, filters channel 1 and publishes ch1_frames.
+ * Word ownership during the split: out[] even words (channel 0) C1 only until C1's post stage, odd words C0 only
+ * between scanned_frames and ch1_frames, C1 only before and after; ladder[0] C1, ladder[1] C0; filter_tail, the
+ * resets, ladder_pre, every other master state word C1 only; filter, resonance and controls_stable are not written
+ * while the block's controls are stable (the split's control snapshot covers the unstable case); the reverb rows and the
+ * filter tables are read-only. The two units below do the work without any waiting, in the order the cores run them,
+ * and are what the host test calls in the split order. */
+#if defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)
+#define BR_MASTER_SPLIT_RUN 1
+#define BR_MASTER_SPLIT_WAIT_TICKS BR_AUDIO_C1_HANG_TICKS   /* a late core is waited for; only a hang gives up */
+#define BR_FX_FLASH_CALL(fn, ...) \
+    ({ __typeof__(&fn) volatile flash_fn_ = &fn; flash_fn_(__VA_ARGS__); })
+#else
+#define BR_MASTER_SPLIT_RUN 0
+#endif
+
+/* Whether the block is worth splitting and allowed to be (everything the pre-pass needs, for the whole block, plus
+ * channel states that differ: identical states are the mono pre-pass's case, which is already one channel of work).
+ * Fills the control snapshot. The master must be active. */
+static uint32_t br_master_split_decide(uint32_t n, br_master_ctl_t *k)
+{
+    const br_filter_t *l = br_master_state.ladder;
+    if (n < 32u || br_master_state.filter >= 63u ||
+        (!br_master_state.controls_stable && br_master_cached.filter >= 63u) ||
+        l[0].mix != 32767 || l[1].mix != 32767 || !l[0].ladder_tick || !l[1].ladder_tick ||
+        br_master_state.filter_tail < FS / 4u + n || !memcmp(&l[0], &l[1], sizeof l[0]))
+        return 0u;
+#ifdef BR_MASTER_LADDER_BLOCK_TEST_SWITCH
+    if (!br_master_ladder_block_enable) return 0u;
+#endif
+    k->stable = br_master_state.controls_stable; k->f0 = br_master_state.filter; k->r0 = br_master_state.resonance;
+    k->ft = br_master_cached.filter; k->rt = br_master_cached.resonance;
+    return 1u;
+}
+
+/* C1, first half of a slice: reverb return into channel 0, then the tail bookkeeping and state resets of
+ * br_master_ladder_block for the slice from the unfiltered frames (channel 1 and its reverb return read, not written).
+ * Returns whether channel 0 of the slice fits the clamp-free copy. */
+static uint32_t br_master_split_scan(int32_t *out, uint32_t base, uint32_t end)
+{
+    uint32_t i, tail = br_master_state.filter_tail, fit = 0u, gr = br_gr_run && br_gr_out_seq == br_fx_block_seq;
+    uint32_t prev = br_gr_cur ^ 1u;
+    const int32_t *wet_l = br_gr_send[prev][BR_GR_WET_L_ROW], *wet_r = br_gr_send[prev][BR_GR_WET_R_ROW];
+    int32_t *frame = &out[2u * base];
+    for (i = 0u; i < end - base; ++i) {
+        int32_t a = frame[2u * i], b = frame[2u * i + 1u], peak;
+        if (gr) { a += wet_l[base + i]; frame[2u * i] = a; b += wet_r[base + i]; }
+        fit |= (uint32_t)a + 524288u;
+        peak = a < 0 ? -a : a;
+        if ((b < 0 ? -b : b) > peak) peak = b < 0 ? -b : b;
+        if (peak > 2) tail = FS * 2u;
+        else if (tail) --tail;
+    }
+    br_master_state.filter_tail = tail;
+    br_master_state.low[0] = br_master_state.low[1] = 0;
+    br_master_state.svf_low[0] = br_master_state.svf_low[1] = 0;
+    br_master_state.band[0] = br_master_state.band[1] = 0;
+    br_master_state.hp2_low[0] = br_master_state.hp2_low[1] = 0;
+    br_master_state.hp2_band[0] = br_master_state.hp2_band[1] = 0;
+    return fit < 1048576u && BR_FX_MASTER_LADDER_HEADROOM_SHIFT >= 1;
+}
+
+/* C1, second half: channel 0 of the slice through the ladder. */
+static void br_master_split_filter0(int32_t *out, uint32_t base, uint32_t end, uint32_t fit, const br_master_ctl_t *k)
+{
+    br_master_ladder_channel(&out[2u * base], end - base, 0u, fit, 0u, k, base);
+}
+
+/* C0: channel 1 of the slice: its reverb return, then the ladder. Touches only odd words of out[] and ladder[1]. */
+static void br_master_split_channel1(int32_t *out, uint32_t base, uint32_t end, const br_master_ctl_t *k)
+{
+    uint32_t i, fit = 0u, gr = br_gr_run && br_gr_out_seq == br_fx_block_seq, prev = br_gr_cur ^ 1u;
+    const int32_t *wet_r = br_gr_send[prev][BR_GR_WET_R_ROW];
+    int32_t *frame = &out[2u * base + 1u];
+    for (i = 0u; i < end - base; ++i) {
+        int32_t b = frame[2u * i];
+        if (gr) { b += wet_r[base + i]; frame[2u * i] = b; }
+        fit |= (uint32_t)b + 524288u;
+    }
+    br_master_ladder_channel(&out[2u * base], end - base, 1u, fit < 1048576u && BR_FX_MASTER_LADDER_HEADROOM_SHIFT >= 1,
+                             0u, k, base);
+}
+
+#if BR_MASTER_SPLIT_RUN
+/* C1, after br_master_fx_begin_block: decide, publish the control snapshot and the decision (always: C0 waits for it). */
+static __attribute__((noinline)) uint32_t br_master_split_begin(uint32_t master_active, uint32_t n)
+{
+    br_fx_finish_stream_job_t *job = &br_fx_finish_stream_job;
+    br_master_ctl_t k;
+    uint32_t split = master_active && br_master_split_decide(n, &k);
+    job->post_frames = 0u;
+    if (split) {
+        job->split_ctl[0] = k.stable; job->split_ctl[1] = k.f0; job->split_ctl[2] = k.r0;
+        job->split_ctl[3] = k.ft; job->split_ctl[4] = k.rt;
+    }
+    FM1_CPU1_WORKER_BARRIER();
+    job->split_state = split ? 2u : 1u;
+    FM1_CPU1_WORKER_BARRIER();
+    return split;
+}
+
+/* C1: the post stages (frame function with the filter skipped) of the next slices, in order, for as many as have both
+ * channels filtered: slice k needs channel 0 done (end <= ahead_end) and ch1_frames >= its end. With wait, it waits
+ * (bounded) for the rest. Returns 0 if C0's channel 1 did not arrive in time. */
+static __attribute__((noinline)) uint32_t br_master_split_post(int32_t *out, uint32_t n, uint32_t ahead_end, uint32_t wait)
+{
+    br_fx_finish_stream_job_t *job = &br_fx_finish_stream_job;
+    uint32_t at = job->post_frames;
+    while (at < ahead_end) {
+        uint32_t pe = at + 16u > n ? n : at + 16u;
+        if (job->ch1_frames < pe) {
+            uint32_t start = fm1_ticks();
+            if (!wait) break;
+            while (job->ch1_frames < pe)
+                if ((uint32_t)(fm1_ticks() - start) >= BR_MASTER_SPLIT_WAIT_TICKS) return 0u;
+        }
+        FM1_CPU1_WORKER_BARRIER();
+        br_master_state.ladder_pre = 2u;
+        BR_FX_FLASH_CALL(br_master_fx_process_range, out, at, pe);
+        at = pe;
+        job->post_frames = at;
+    }
+    return 1u;
+}
+
+/* C1, one slice as C0 produces it, in place of the reverb add: reverb return for channel 0, scan, publish, channel 0;
+ * then, without waiting, the post stages of earlier slices whose channel 1 is already done. */
+static __attribute__((noinline)) uint32_t br_master_split_step(int32_t *out, uint32_t n, uint32_t base, uint32_t end)
+{
+    br_fx_finish_stream_job_t *job = &br_fx_finish_stream_job;
+    br_master_ctl_t k;
+    uint32_t fit;
+    k.stable = job->split_ctl[0]; k.f0 = job->split_ctl[1]; k.r0 = job->split_ctl[2];
+    k.ft = job->split_ctl[3]; k.rt = job->split_ctl[4];
+    fit = br_master_split_scan(out, base, end);
+    FM1_CPU1_WORKER_BARRIER();
+    job->scanned_frames = end;
+    FM1_CPU1_WORKER_BARRIER();
+    br_master_split_filter0(out, base, end, fit, &k);
+    return br_master_split_post(out, n, end, 0u);
+}
+
+#if BR_MASTER_SPLIT_EARLY_CH1
+/* C0, inside its mix loop, after each published slice: channel 1 of every slice C1 has already scanned, never waiting.
+ * ch1_frames is C0's own cursor. */
+static __attribute__((noinline)) void br_master_split_poll(int32_t *out, uint32_t n)
+{
+    br_fx_finish_stream_job_t *job = &br_fx_finish_stream_job;
+    br_master_ctl_t k;
+    uint32_t base;
+#if BR_IDLE_STAGE_TICKS
+    uint32_t trace_lap = BR_IDLE_NOW();
+#endif
+    if (job->split_state != 2u) return;
+    FM1_CPU1_WORKER_BARRIER();
+    k.stable = job->split_ctl[0]; k.f0 = job->split_ctl[1]; k.r0 = job->split_ctl[2];
+    k.ft = job->split_ctl[3]; k.rt = job->split_ctl[4];
+    for (base = job->ch1_frames; base < n; base += 16u) {
+        uint32_t end = base + 16u > n ? n : base + 16u;
+        if (job->scanned_frames < end) break;
+        FM1_CPU1_WORKER_BARRIER();
+        br_master_split_channel1(out, base, end, &k);
+        FM1_CPU1_WORKER_BARRIER();
+        job->ch1_frames = end;
+        FM1_CPU1_WORKER_BARRIER();
+    }
+#if BR_IDLE_STAGE_TICKS
+    BR_IDLE_LAP(BR_TS_ACC_C0CH1, trace_lap);
+#endif
+}
+
+#endif
+
+/* C0, after its mix loop has published every slice: channel 1 of the remaining slices behind C1's scan. */
+static __attribute__((noinline)) void br_master_split_cpu0(int32_t *out, uint32_t n)
+{
+    br_fx_finish_stream_job_t *job = &br_fx_finish_stream_job;
+    br_master_ctl_t k;
+    uint32_t base, start = fm1_ticks();
+#if BR_IDLE_STAGE_TICKS
+    uint32_t trace_lap = BR_IDLE_NOW();
+#endif
+    while (!job->split_state)
+        if ((uint32_t)(fm1_ticks() - start) >= BR_MASTER_SPLIT_WAIT_TICKS) return;
+    FM1_CPU1_WORKER_BARRIER();
+    if (job->split_state != 2u) return;
+    k.stable = job->split_ctl[0]; k.f0 = job->split_ctl[1]; k.r0 = job->split_ctl[2];
+    k.ft = job->split_ctl[3]; k.rt = job->split_ctl[4];
+    for (base = job->ch1_frames; base < n; base += 16u) {
+        uint32_t end = base + 16u > n ? n : base + 16u;
+        start = fm1_ticks();
+        while (job->scanned_frames < end)
+            if ((uint32_t)(fm1_ticks() - start) >= BR_MASTER_SPLIT_WAIT_TICKS) return;
+        FM1_CPU1_WORKER_BARRIER();
+        br_master_split_channel1(out, base, end, &k);
+        FM1_CPU1_WORKER_BARRIER();
+        job->ch1_frames = end;
+        FM1_CPU1_WORKER_BARRIER();
+    }
+#if BR_IDLE_STAGE_TICKS
+    BR_IDLE_LAP(BR_TS_ACC_C0CH1, trace_lap);
+#endif
+}
+#endif /* BR_MASTER_SPLIT_RUN */
+#endif /* BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER */
+
 
 #if BR_FX_STAGED_COMPACT_CALL_ABI
+/* Zero the rows of the silent-skipped tracks in [first, last) for this block (see BR_IDLE_SKIP_SILENT_ROWS). */
+static BR_FX_PREPARE_CODE __attribute__((noinline)) void br_fx_materialize_silent_rows(
+    uint32_t first, uint32_t last, uint32_t n)
+{
+    uint32_t p, i;
+    for (p = first; p < last; ++p)
+        if (br_fx_track_silent_seq[p] == br_fx_block_seq)
+            for (i = 0u; i < n; ++i)
+                br_fx_track_stereo[p][i][0] = br_fx_track_stereo[p][i][1] = 0;
+}
+
 static BR_FX_RAM_AUDIO int br_fx_process_track_job_staged_block(
     uint32_t p, const int32_t *input_bus, uint32_t n, uint32_t sample_base,
     uint32_t pan, uint32_t progress_core
@@ -4763,6 +5266,7 @@ static BR_FX_RAM_AUDIO int br_fx_process_track_job_staged_block(
 
     tail_samples = st->tail_samples;
     lfo_start = st->lfo_phase;
+    uint32_t trace_lap = BR_IDLE_NOW();
 
     /* Keep each recursive effect's sample order while grouping work by stage.
      * The delay and reverb feedback loops still see their own previous writes. */
@@ -4778,6 +5282,7 @@ static BR_FX_RAM_AUDIO int br_fx_process_track_job_staged_block(
     }
 #endif
     lfo_final = st->lfo_phase;
+    BR_IDLE_LAP(BR_TS_ACC_MOD + p, trace_lap);
 
 #if BR_FX_BLOCK_STAGE_SPECIALIZE_DELAY
     br_fx_stage_delay_block(st, p, sample_base, progress_core, lfo_start, c->mod_lfo_inc,
@@ -4798,10 +5303,12 @@ static BR_FX_RAM_AUDIO int br_fx_process_track_job_staged_block(
     st->lfo_phase = lfo_final;
 #endif
 
+    BR_IDLE_LAP(BR_TS_ACC_DELAY + p, trace_lap);
 #if BR_FX_GLOBAL_REVERB
     br_fx_stage_send_block(st, p, sample_base, progress_core, pan, lfo_final,
         input_bus, mod_out, n, s, cfg, c, &tail_samples, stereo);
 #endif
+    BR_IDLE_LAP(BR_TS_ACC_SEND + p, trace_lap);
     st->lfo_phase = lfo_final;
     return 1;
 }
@@ -4916,12 +5423,13 @@ static BR_FX_RAM_AUDIO int br_fx_process_track_job_staged(
     if (!st->tail_samples && !transition_reverb && !transition_mod) {
         for (i = 0u; i < n && !input_bus[i]; ++i) {}
         if (i == n) {
-            for (i = 0u; i < n; ++i)
-                br_fx_track_stereo[p][i][0] = br_fx_track_stereo[p][i][1] = 0;
+            if (!BR_IDLE_SKIP_SILENT_ROWS)
+                for (i = 0u; i < n; ++i)
+                    br_fx_track_stereo[p][i][0] = br_fx_track_stereo[p][i][1] = 0;
+            br_fx_track_silent_seq[p] = br_fx_block_seq;
 #if BR_FX_GLOBAL_REVERB
             br_gr_have[br_gr_cur][p] = 0u;     /* silence: nothing for the reverb to hear */
 #endif
-            br_fx_track_silent_seq[p] = br_fx_block_seq;
             return 1;
         }
     }
@@ -5093,9 +5601,11 @@ static BR_FX_RAM_AUDIO __attribute__((noinline)) void br_fx_process_track_job_im
 #if BR_FX_GLOBAL_REVERB
     br_gr_have[br_gr_cur][p] = br_fx_controls[p].reverb_wet != 0u;   /* silent tracks clear it */
 #endif
+    uint32_t trace_lap = BR_IDLE_NOW();
     if ((br_fx_sound_at(p)->drive || br_fx_track[p].drive_send) &&   /* DRIVE first; at send 0 one more block fades it */
         BR_FX_PREPARE_INVOKE(br_fx_drive_block, p, input_bus, br_fx_drive_buf[p], n))
         input_bus = br_fx_drive_buf[p];
+    BR_IDLE_LAP(BR_TS_ACC_DRIVE + p, trace_lap);
     br_fx_progress_store(br_fx_progress_retained.words, progress_core, p, 0u, BR_FX_PROGRESS_ENTRY);
     const uint32_t enabled = br_fx_job_enabled[p];
     st = &br_fx_track[p];
@@ -5328,7 +5838,9 @@ static BR_FX_RAM_AUDIO __attribute__((noinline)) void br_fx_process_track_job_im
 #if BR_FX_BLOCK_STAGE_PIPELINE
 track_job_complete:
     if (pan_from != pan_to) {
-        BR_FX_PREPARE_INVOKE(br_fx_pan_ramp, br_fx_track_stereo[p], n, pan_from, pan_to);
+        /* A silent-skipped track's rows are logically zero and a ramp of zeros is zero: skip the ramp. */
+        if (!(BR_IDLE_SKIP_SILENT_ROWS && br_fx_track_silent_seq[p] == br_fx_block_seq))
+            BR_FX_PREPARE_INVOKE(br_fx_pan_ramp, br_fx_track_stereo[p], n, pan_from, pan_to);
         br_fx_pan_prev[p] = pan_to;
     }
 #endif
@@ -5591,6 +6103,9 @@ BR_FX_RAM_AUDIO BR_AUDIO_API uint32_t br_fx_worker_track_batch(void *opaque_batc
 #if BR_FX_GLOBAL_REVERB
         uint32_t gr_active;
 #endif
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+        uint32_t split = 0u;
+#endif
 #if defined(FM1_DEVICE) || \
     (defined(BR_SOURCE_QUEUE_TEST) && defined(BR_FX_STREAM_TEST_CLOCK))
         uint32_t start;
@@ -5602,11 +6117,18 @@ BR_FX_RAM_AUDIO BR_AUDIO_API uint32_t br_fx_worker_track_batch(void *opaque_batc
 #endif
             return 0u;
         }
+        BR_IDLE_STAMP(22);                        /* CPU1 picked the stream job up */
         if (br_fx_finish_stream_job.pre) br_fx_finish_stream_job.pre();
+        BR_IDLE_STAMP(BR_TS_CPU1_PRE);
         master_active = BR_FX_MASTER_PREPARE_TARGET(
             br_master_fx_begin_block)(br_fx_finish_stream_job.n);
+        BR_IDLE_STAMP(23);                        /* after the pre hook and the master begin_block */
 #if BR_FX_GLOBAL_REVERB
         gr_active = br_gr_run;
+#endif
+        BR_IDLE_VAL(BR_TS_CPU1_FLAGS, (master_active ? 1u : 0u) | (br_gr_run ? 2u : 0u));
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+        split = BR_FX_FLASH_CALL(br_master_split_begin, master_active, br_fx_finish_stream_job.n);
 #endif
         /* No early return when nothing is active: the master limiter below
          * needs the whole block. */
@@ -5619,24 +6141,40 @@ BR_FX_RAM_AUDIO BR_AUDIO_API uint32_t br_fx_worker_track_batch(void *opaque_batc
             start = br_fx_stream_test_ticks();
             br_fx_stream_test_waiting(end);
 #endif
+            uint32_t trace_lap = BR_IDLE_NOW();
             while (BR_FX_STREAM_LOAD_PRODUCED(&br_fx_finish_stream_job) < end) {
                 /* C0 is guaranteed to publish every completed slice. Bound
                  * each producer stall; earlier slice rendering must not eat
                  * this slice's wait budget. */
 #if defined(FM1_DEVICE)
-                if ((uint32_t)(fm1_ticks() - start) >= 17415u) return 0u;
+                if ((uint32_t)(fm1_ticks() - start) >= BR_AUDIO_C1_HANG_TICKS) return 0u;
 #elif defined(BR_SOURCE_QUEUE_TEST) && defined(BR_FX_STREAM_TEST_CLOCK)
-                if ((uint32_t)(br_fx_stream_test_ticks() - start) >= 17415u) {
+                if ((uint32_t)(br_fx_stream_test_ticks() - start) >= BR_AUDIO_C1_HANG_TICKS) {
                     br_fx_stream_test_done();
                     return 0u;
                 }
 #endif
             }
             FM1_CPU1_WORKER_BARRIER();
+            BR_IDLE_LAP(BR_TS_ACC_WAITP, trace_lap);
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+            if (split) {
+                if (!BR_FX_FLASH_CALL(br_master_split_step, br_fx_finish_stream_job.out,
+                                      br_fx_finish_stream_job.n, base, end)) return 0u;
+                BR_IDLE_LAP(BR_TS_ACC_MASTER, trace_lap);   /* reverb return, scan, channel 0 and any post stages: master */
+            } else
+#endif
+            {
 #if BR_FX_GLOBAL_REVERB
             if (gr_active) br_gr_add_range(br_fx_finish_stream_job.out, base, end);
 #endif
+            BR_IDLE_LAP(BR_TS_ACC_REVERB, trace_lap);
+            }
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+            if (master_active && !split) {
+#else
             if (master_active) {
+#endif
 #if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
                 uint32_t master_started = fm1_ticks();
 #endif
@@ -5648,17 +6186,31 @@ BR_FX_RAM_AUDIO BR_AUDIO_API uint32_t br_fx_worker_track_batch(void *opaque_batc
 #if defined(BR_SOURCE_QUEUE_TEST) && defined(BR_FX_STREAM_TEST_CLOCK)
             br_fx_stream_test_after_range(end);
 #endif
+            BR_IDLE_LAP(BR_TS_ACC_MASTER, trace_lap);
             base = end;
         }
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+        /* Channel 0 of every slice is done: finish the post stages as C0's channel 1 arrives. */
+        if (split) {
+            uint32_t post_lap = BR_IDLE_NOW();
+            if (!BR_FX_FLASH_CALL(br_master_split_post, br_fx_finish_stream_job.out,
+                                  br_fx_finish_stream_job.n, br_fx_finish_stream_job.n, 1u)) return 0u;
+            BR_IDLE_LAP(BR_TS_ACC_MASTER, post_lap);        /* the remaining post stages (and the wait for channel 1) */
+            (void)post_lap;
+        }
+#endif
+        BR_IDLE_STAMP(BR_TS_CPU1_LIM0);
         /* Master limiter over the whole block, then master volume (which
          * therefore no longer runs per slice). */
         br_master_limit_block(br_fx_finish_stream_job.out, br_fx_finish_stream_job.n);
+        BR_IDLE_STAMP(BR_TS_CPU1_LIM1);
 #if BR_FX_STREAM_OUTPUT_SCALE
         if (br_fx_finish_stream_job.scale)
             br_fx_scale_q12_clip_range(br_fx_finish_stream_job.out,
                                        2u * br_fx_finish_stream_job.n,
                                        (uint32_t)br_fx_finish_stream_job.gain_q12);
 #endif
+        BR_IDLE_STAMP(BR_TS_CPU1_END);
 #if defined(BR_SOURCE_QUEUE_TEST) && defined(BR_FX_STREAM_TEST_CLOCK)
         br_fx_stream_test_done();
 #endif
@@ -5857,10 +6409,11 @@ static void br_fx_meter_capture(int32_t bus[BR_PARTS][BR_BLOCK], uint32_t n, uin
 
 #if defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO) && defined(BR_SPLIT_AUDIO)
 /* CPU0's wait for the streamed master FX, from flash (called through the RAM
- * finish block's volatile pointer): at least min_ticks, otherwise until the
- * half's source deadline (audio_deadline.h br_audio_stream_wait_ticks). A failure
- * is recorded for 0xB2: site, and the budget waited (bit 31: CPU1 itself gave up,
- * a 17,415-tick stall waiting for one of CPU0's mix slices). */
+ * finish block's volatile pointer): at least min_ticks, otherwise until the HANG
+ * limit, one half after the half's source deadline (audio_deadline.h
+ * br_audio_stream_wait_ticks): a late but healthy CPU1 is waited for, only a hung one is reset.
+ * A failure is recorded for 0xB2: site, and the budget waited (bit 31: CPU1 itself gave up,
+ * after BR_AUDIO_C1_HANG_TICKS of waiting for one of CPU0's mix slices). */
 static __attribute__((noinline)) uint32_t br_fx_stream_wait(uint32_t sequence, uint32_t min_ticks,
                                                              uint32_t *result)
 {
@@ -5877,6 +6430,22 @@ static __attribute__((noinline)) uint32_t br_fx_stream_wait(uint32_t sequence, u
 }
 #endif
 
+#if BR_IDLE_SKIP_STREAM_ON
+/* 1: the master's STATE is at rest, the same test as the neutral return of br_master_fx_begin_block (filter 63/64,
+ * no saturation/wow/heat, no tails, ladders off). Only a performance guess: if the master CONTROLS moved, the
+ * inline finish still runs the master (on CPU0) exactly as the stream would. Flash code. */
+static BR_FX_PREPARE_CODE __attribute__((noinline)) uint32_t br_fx_idle_master_rest(void)
+{
+    return (br_master_state.filter == 63u || br_master_state.filter == 64u) &&
+           !br_master_state.saturation && !br_master_state.wow && !br_master_state.wow_tail &&
+           !br_master_state.heat_amount && !br_master_state.filter_tail
+#if BR_FILTER_LADDER
+           && !br_master_state.ladder[0].mix && !br_master_state.ladder[1].mix
+#endif
+           ;
+}
+#endif
+
 static BR_FX_RAM_AUDIO void br_fx_finish_block(
     int32_t bus[BR_PARTS][BR_BLOCK], int32_t *out, uint32_t n,
     uint32_t comp_active
@@ -5888,6 +6457,7 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
     uint32_t i, p;
 #if BR_AUDIO_FUSION_ONLY_BUILD
     if (br_fx_meter_enabled) {
+        BR_FX_PREPARE_INVOKE(br_fx_materialize_silent_rows, 0u, BR_PARTS, n);
         void (*volatile capture_fn)(int32_t [BR_PARTS][BR_BLOCK], uint32_t, uint32_t) = br_fx_meter_capture;
 #if BR_FX_MASTER_FRAME_INLINE_FINISH
         capture_fn(bus, n, dry_center);
@@ -5897,6 +6467,19 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
     }
 #endif
     uint32_t master_active = 0u;
+#if BR_IDLE_SKIP_STREAM_ON
+    uint32_t inputs_silent, stream_skip;
+    br_fx_out_zero = 0u;
+    inputs_silent = br_fx_finish_inputs_silent(bus, n, comp_active
+#if BR_FX_MASTER_FRAME_INLINE_FINISH
+                                               , dry_center
+#else
+                                               , 0u
+#endif
+                                               );
+    /* Silent inputs, no shared-reverb return, master state at rest: nothing for CPU1 to do in parallel. */
+    stream_skip = n && inputs_silent && !br_gr_run && BR_FX_PREPARE_INVOKE(br_fx_idle_master_rest);
+#endif
 #if BR_FX_FINISH_MASTER_STREAM
     uint32_t stream_active = 0u;
 #if (defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)) || defined(BR_SOURCE_QUEUE_TEST)
@@ -5917,7 +6500,11 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
     uint32_t on_c0 = 1u;
     extern volatile uint32_t br_audio_source_worker_fault;
 #endif
-    if (n && on_c0 && !br_audio_source_worker_fault && stream_available_fn()) {
+    if (n && on_c0 && !br_audio_source_worker_fault && stream_available_fn()
+#if BR_IDLE_SKIP_STREAM_ON
+        && !(stream_skip && (br_post_join.pending ? (({ __typeof__(&br_engine_post_join_run) volatile post_join_fn_ = &br_engine_post_join_run; post_join_fn_(); }), 1u) : 1u))
+#endif
+        ) {
         br_fx_finish_stream_job.out = out;
         br_fx_finish_stream_job.n = n;
 #if BR_AUDIO_DEFER_POST_JOIN
@@ -5932,7 +6519,13 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
         br_fx_finish_stream_job.scale = 0u;
 #endif
         BR_FX_STREAM_PUBLISH_PRODUCED(&br_fx_finish_stream_job, 0u);
+#if BR_MASTER_SPLIT_CORES
+        br_fx_finish_stream_job.split_state = 0u;
+        br_fx_finish_stream_job.scanned_frames = 0u;
+        br_fx_finish_stream_job.ch1_frames = 0u;
+#endif
         FM1_CPU1_WORKER_BARRIER();
+        BR_IDLE_STAMP(18);
         stream_status = stream_submit_fn(&br_fx_finish_stream_job, &stream_sequence);
         if (stream_status == FM1_CPU1_WORKER_OK) stream_active = 1u;
     }
@@ -5949,6 +6542,9 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
 #if BR_FX_SILENT_FINISH
     /* Every input is zero and the compressor is at rest: each frame would add
      * zero to the output, so skip the per-frame mix (exactly equivalent). */
+#if BR_IDLE_SKIP_STREAM_ON
+    i = inputs_silent ? n : 0u;
+#else
     i = br_fx_finish_inputs_silent(bus, n, comp_active
 #if BR_FX_MASTER_FRAME_INLINE_FINISH
                                    , dry_center
@@ -5956,6 +6552,13 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
                                    , 0u
 #endif
                                    ) ? n : 0u;
+#endif
+#if BR_FX_MASTER_FRAME_INLINE_FINISH
+    if (i < n && !dry_center)
+        BR_FX_PREPARE_INVOKE(br_fx_materialize_silent_rows, 0u, BR_PARTS, n);
+#else
+    if (i < n) BR_FX_PREPARE_INVOKE(br_fx_materialize_silent_rows, 0u, BR_PARTS, n);
+#endif
 #if BR_FX_FINISH_MASTER_STREAM
     if (i == n && stream_active) {
         FM1_CPU1_WORKER_BARRIER();
@@ -6130,6 +6733,9 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
             FM1_CPU1_WORKER_BARRIER();
             BR_FX_STREAM_PUBLISH_PRODUCED(&br_fx_finish_stream_job, i + 1u);
             FM1_CPU1_WORKER_BARRIER();
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN && BR_MASTER_SPLIT_EARLY_CH1
+            if (br_fx_finish_stream_job.split_state == 2u) BR_FX_FLASH_CALL(br_master_split_poll, out, n);
+#endif
         }
 #endif
     }
@@ -6138,6 +6744,10 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
 #endif
 #if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
     br_tail_stamp[BR_TAIL_MIX_END] = fm1_ticks();
+#endif
+#if BR_MASTER_SPLIT_CORES && BR_FILTER_LADDER && BR_MASTER_SPLIT_RUN
+    /* All slices are published: take channel 1 of the master low-pass behind C1's scan instead of waiting. */
+    if (stream_active) BR_FX_FLASH_CALL(br_master_split_cpu0, out, n);
 #endif
 #if BR_FX_GLOBAL_REVERB
 #if BR_FX_FINISH_MASTER_STREAM
@@ -6155,8 +6765,10 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
         /* At least 18,415 ticks, on the unit until the half's source deadline
          * (br_fx_stream_wait). Only the wait guard changes; successful DSP
          * output and controls are unchanged. */
+        BR_IDLE_STAMP(BR_TS_CPU0_MIX_END);
         uint32_t stream_status = stream_wait_fn(stream_sequence,
             BR_AUDIO_STREAM_WAIT_MIN_TICKS, &stream_result);
+        BR_IDLE_STAMP(19);
         if (stream_status != FM1_CPU1_WORKER_OK || stream_result != 1u) {
             br_audio_source_worker_fault = 1u;
             (void)stream_abort_fn();
@@ -6181,7 +6793,17 @@ static BR_FX_RAM_AUDIO void br_fx_finish_block(
 #if BR_FX_FINISH_MASTER_STREAM
     if (!stream_active) /* the stream job limits on CPU1 */
 #endif
-        br_master_limit_block(out, n);
+    {
+#if BR_IDLE_SKIP_STREAM_ON
+        /* Silent inputs added nothing, no reverb return, the master did nothing: the output is all zero. With the
+         * limiter at rest (limit_cut == 0) br_master_limit_block would scan the zeros and return without a store,
+         * so skip it, and let the platform skip the scale and the shift of the zero buffer. */
+        if (n && inputs_silent && !br_gr_run && !master_active && !br_master_state.limit_cut)
+            br_fx_out_zero = 1u;
+        else
+#endif
+            br_master_limit_block(out, n);
+    }
 }
 
 static BR_FX_RAM_AUDIO void br_fx_mute_block(int32_t *out, uint32_t n)
@@ -6197,6 +6819,7 @@ static BR_FX_RAM_AUDIO void br_fx_process_ram(int32_t bus[BR_PARTS][BR_BLOCK], i
 {
     uint32_t i, p;
     uint32_t dry_center, comp_active;
+    BR_IDLE_STAMP(17);
     if (n > BR_BLOCK) n = BR_BLOCK;
     if (br_fx_fusion_pending) {
         uint32_t complete = 1u;
@@ -6293,7 +6916,7 @@ static BR_FX_RAM_AUDIO void br_fx_process_ram(int32_t bus[BR_PARTS][BR_BLOCK], i
                         br_fx_run_cpu0_batch(&br_fx_worker_batches[0]) : 0u;
                 } else {
                     cpu0_ok = br_fx_run_cpu0_batch(&br_fx_worker_batches[0]);
-                    status = wait_fn(sequence, 17415u, &worker_result);
+                    status = wait_fn(sequence, BR_AUDIO_C1_HANG_TICKS, &worker_result);
                 }
                 if (!cpu0_ok || status != FM1_CPU1_WORKER_OK || worker_result != 1u) {
                     br_audio_source_worker_fault = 1u;

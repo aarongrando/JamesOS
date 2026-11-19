@@ -272,6 +272,73 @@
 #define FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL 1
 #endif
 
+/* Ring-mod hi-hat: when a square oscillator of the metallic bank provably
+ * holds one level for the whole chunk (no edge, no pending BLEP residue,
+ * steady frequency), skip its per-sample render and use the level directly.
+ * Bit-identical output and state (tests/run_hihat_exact.py); 0 keeps
+ * the original three RenderPair calls. */
+#ifndef FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE
+#define FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE 1
+#endif
+#if FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE != 0 && \
+    FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE != 1
+#error "FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE must be 0 or 1"
+#endif
+
+/* Ring-mod hi-hat: render a saw whose frequency and pulse width are
+ * stationary with a loop that omits the two parameter-interpolator additions
+ * (proven to add nothing) and keeps the phase in a register. Bit-identical
+ * output and state (tests/run_hihat_exact.py); 0 keeps the original calls. */
+#ifndef FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW
+#define FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW 1
+#endif
+#if FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW != 0 && \
+    FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW != 1
+#error "FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW must be 0 or 1"
+#endif
+#if FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW && \
+    !FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE
+#error "FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW builds on FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE"
+#endif
+
+/* Hi-hat: the band-pass and high-pass passes read their three filter
+ * coefficients once per slice instead of reloading them for every sample
+ * (Svf::ProcessLocalCoefficients). Same float operations in the same order.
+ * Bit-identical output and state under IEEE evaluation order
+ * (tests/run_hihat_exact.py). */
+#ifndef FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS
+#define FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS 1
+#endif
+#if FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS != 0 && \
+    FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS != 1
+#error "FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS must be 0 or 1"
+#endif
+
+/* Hi-hat: run the clocked-noise mix and the VCA on local copies of the noise
+ * clock, the held noise sample, the envelope and the two decay coefficients,
+ * written back once per slice. Same float operations in the same order; only
+ * the per-sample reloads and stores of member variables go. Bit-identical
+ * output and state under IEEE evaluation order (tests/run_hihat_exact.py). */
+#ifndef FM1_PLAITS_HIHAT_LOCAL_STATE
+#define FM1_PLAITS_HIHAT_LOCAL_STATE 1
+#endif
+#if FM1_PLAITS_HIHAT_LOCAL_STATE != 0 && FM1_PLAITS_HIHAT_LOCAL_STATE != 1
+#error "FM1_PLAITS_HIHAT_LOCAL_STATE must be 0 or 1"
+#endif
+
+/* Ring-mod hi-hat: advance the phase of a constant-level square for the whole
+ * slice with an exact closed form (Oscillator::AccumulateInBinade) instead of
+ * one float addition per sample; falls back to the additions when the phase
+ * leaves its binade or a rounding tie is possible. Bit-identical output and
+ * state (tests/run_hihat_exact.py). */
+#ifndef FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM
+#define FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM 1
+#endif
+#if FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM != 0 && \
+    FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM != 1
+#error "FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM must be 0 or 1"
+#endif
+
 /* Keep rarely-used initialization routines small without changing steady
  * render code. This is an opt-in Clang-only experiment for the embedded build. */
 #ifndef FM1_PLAITS_COLD_INIT_SIZE

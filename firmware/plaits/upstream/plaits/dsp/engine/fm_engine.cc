@@ -88,36 +88,65 @@ void FMEngine::Render(
   ParameterInterpolator feedback_modulation(
       &previous_feedback_, 2.0f * parameters.morph - 1.0f, size);
   
-  Downsampler carrier_downsampler(&carrier_fir_);
-  Downsampler sub_downsampler(&sub_fir_);
-  
+  float carrier_head = carrier_fir_, carrier_tail = 0.0f;
+  float sub_head = sub_fir_, sub_tail = 0.0f;
+  auto accumulate = [](float& head, float& tail, size_t j, float sample)
+      __attribute__((always_inline)) {
+#if defined(__clang__) && __clang_major__ >= 12
+#pragma clang fp reassociate(off)
+#endif
+    head += sample * lut_4x_downsampler_fir[3 - j];
+    tail += sample * lut_4x_downsampler_fir[j];
+  };
+
   while (size--) {
     const float max_uint32 = 4294967296.0f;
     const float amount = amount_modulation.Next();
     const float feedback = feedback_modulation.Next();
-    float phase_feedback = feedback < 0.0f ? 0.5f * feedback * feedback : 0.0f;
     const uint32_t carrier_increment = static_cast<uint32_t>(
         max_uint32 * carrier_frequency.Next());
-    float _modulator_frequency = modulator_frequency.Next();
+    const float modulator_step = max_uint32 * modulator_frequency.Next();
 
-    for (size_t j = 0; j < kOversampling; ++j) {
-      modulator_phase_ += static_cast<uint32_t>(max_uint32 * \
-           _modulator_frequency * (1.0f + previous_sample_ * phase_feedback));
-      carrier_phase_ += carrier_increment;
-      sub_phase_ += carrier_increment >> 1;
-      float modulator_fb = feedback > 0.0f ? 0.25f * feedback * feedback : 0.0f;
-      float modulator = SinePM(
-          modulator_phase_, modulator_fb * previous_sample_);
-      float carrier = SinePM(carrier_phase_, amount * modulator);
-      float sub = SinePM(sub_phase_, amount * carrier * 0.25f);
-      ONE_POLE(previous_sample_, carrier, 0.05f);
-      carrier_downsampler.Accumulate(j, carrier);
-      sub_downsampler.Accumulate(j, sub);
+    // The sign of this sample's interpolated feedback selects exactly one
+    // feedback route. All four oversamples use the same sign and amount.
+    auto render_four = [&](bool frequency_feedback) __attribute__((always_inline)) {
+      const float phase_feedback = 0.5f * feedback * feedback;
+      const float modulator_feedback = 0.25f * feedback * feedback;
+      auto step = [&](size_t j) __attribute__((always_inline)) {
+        const float increment = frequency_feedback
+            ? modulator_step * (1.0f + previous_sample_ * phase_feedback)
+            : modulator_step;
+        modulator_phase_ += static_cast<uint32_t>(increment);
+        carrier_phase_ += carrier_increment;
+        sub_phase_ += carrier_increment >> 1;
+        const float modulator = SinePM(modulator_phase_,
+            frequency_feedback ? 0.0f : modulator_feedback * previous_sample_);
+        const float carrier = SinePM(carrier_phase_, amount * modulator);
+        const float sub = SinePM(sub_phase_, amount * carrier * 0.25f);
+        ONE_POLE(previous_sample_, carrier, 0.05f);
+        accumulate(carrier_head, carrier_tail, j, carrier);
+        accumulate(sub_head, sub_tail, j, sub);
+      };
+      static_assert(kOversampling == 4, "FM FIR has four ordered taps");
+      step(0);
+      step(1);
+      step(2);
+      step(3);
+    };
+    if (feedback < 0.0f) {
+      render_four(true);
+    } else {
+      render_four(false);
     }
-    
-    *out++ = carrier_downsampler.Read();
-    *aux++ = sub_downsampler.Read();
+
+    *out++ = carrier_head;
+    *aux++ = sub_head;
+    carrier_head = carrier_tail;
+    sub_head = sub_tail;
+    carrier_tail = sub_tail = 0.0f;
   }
+  carrier_fir_ = carrier_head;
+  sub_fir_ = sub_head;
 }
 
 }  // namespace plaits

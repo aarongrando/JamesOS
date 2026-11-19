@@ -140,25 +140,50 @@ int main(void)
         assert(stream_half(BR_AUDIO_STREAM_WAIT_MIN_TICKS, 20000u) == 0u);
         assert(fm1_cpu1_worker_fault && c1_held && !fm1_cpu1_worker_uncontained_fault);
         assert(fm1_cpu1_worker_mailbox.state == FM1_CPU1_WORKER_ABORTED);
-        /* Fix B: the same half with the budget until the source deadline. */
+        /* Fix B (now to the HANG limit, one half after the source deadline, about 269,000 ticks from the half start):
+         * the same half waits until then. */
         boot();
         half_start = now; deadline = half_start + BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS;
         now = half_start + 95000u;
-        assert(br_audio_stream_wait_ticks(1u, deadline, now) == 35103u);
+        assert(br_audio_stream_wait_ticks(1u, deadline, now) == deadline + FM1_AUDIO_HALF_TICKS - now);
+        assert(br_audio_stream_wait_ticks(1u, deadline, now) == 174422u);
         assert(stream_half(br_audio_stream_wait_ticks(1u, deadline, now), 20000u) == 1u);
         assert(!fm1_cpu1_worker_fault && now - half_start < BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS);
-        /* The minimum holds when the deadline is near, past or not this half's. */
-        assert(br_audio_stream_wait_ticks(1u, deadline, deadline - 100u) == BR_AUDIO_STREAM_WAIT_MIN_TICKS);
-        assert(br_audio_stream_wait_ticks(1u, deadline, deadline + 100u) == BR_AUDIO_STREAM_WAIT_MIN_TICKS);
+        /* The trace's failure: CPU1 still needs 19,000 ticks after CPU0 waited 19,000 (above the old
+         * minimum) at a time when the source deadline is 7,000 ticks away; and a CPU1 that finishes AFTER the
+         * source deadline but before the hang limit: both are waited for, CPU1 stays in service. */
+        boot();
+        half_start = now; deadline = half_start + BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS;
+        now = deadline - 7000u;
+        assert(stream_half(br_audio_stream_wait_ticks(1u, deadline, now), 19500u) == 1u);
+        assert(!fm1_cpu1_worker_fault && !c1_held && (int32_t)(now - deadline) > 0);
+        boot();
+        half_start = now; deadline = half_start + BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS;
+        now = half_start + 112112u;
+        assert(stream_half(br_audio_stream_wait_ticks(1u, deadline, now), 60000u) == 1u);
+        assert(!fm1_cpu1_worker_fault && !c1_held && now - half_start > BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS);
+        /* The budget is the time to the hang limit; the minimum holds when that is near or past, or the
+         * deadline is not this half's or not valid. */
+        assert(br_audio_stream_wait_ticks(1u, deadline, deadline - 100u) == FM1_AUDIO_HALF_TICKS + 100u);
+        assert(br_audio_stream_wait_ticks(1u, deadline, deadline + 100u) == FM1_AUDIO_HALF_TICKS - 100u);
+        assert(br_audio_stream_wait_ticks(1u, deadline, deadline + FM1_AUDIO_HALF_TICKS - 5000u) ==
+               BR_AUDIO_STREAM_WAIT_MIN_TICKS);
+        assert(br_audio_stream_wait_ticks(1u, deadline, deadline + FM1_AUDIO_HALF_TICKS + 100u) ==
+               BR_AUDIO_STREAM_WAIT_MIN_TICKS);
         assert(br_audio_stream_wait_ticks(0u, deadline, half_start) == BR_AUDIO_STREAM_WAIT_MIN_TICKS);
         assert(br_audio_stream_wait_ticks(1u, half_start + 3u * FM1_AUDIO_HALF_TICKS, half_start) ==
                BR_AUDIO_STREAM_WAIT_MIN_TICKS);
-        /* A really hung CPU1 still faults at the deadline: Fix A takes over. */
+        /* A really hung CPU1 still faults, at the hang limit. */
         boot();
         half_start = now; deadline = half_start + BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS;
         now = half_start + 95000u;
         assert(stream_half(br_audio_stream_wait_ticks(1u, deadline, now), C1_HUNG) == 0u);
-        assert((int32_t)(now - deadline) >= 0 && (int32_t)(now - deadline) < 1000);
+        assert(fm1_cpu1_worker_fault && c1_held);
+        assert((int32_t)(now - (deadline + FM1_AUDIO_HALF_TICKS)) >= 0 &&
+               (int32_t)(now - (deadline + FM1_AUDIO_HALF_TICKS)) < 1000);
+        /* The hang limit is one half after the source deadline (audio_deadline.h) and fits one wait. */
+        assert(BR_AUDIO_C1_HANG_AFTER_DEADLINE_TICKS == FM1_AUDIO_HALF_TICKS);
+        assert(BR_AUDIO_PIPELINE_SOURCE_BUDGET_TICKS + BR_AUDIO_C1_HANG_AFTER_DEADLINE_TICKS < FM1_CPU1_WORKER_TIMEOUT_TICKS);
     }
 
     /* 3. Fix A, after the contained fault: CPU1 is held, nothing is submitted

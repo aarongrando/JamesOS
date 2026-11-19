@@ -38,16 +38,16 @@ The screenshots above are illustrative; compare release graphics with the exact 
 
 ## Status
 
-This tree is JamesOS 1.0b, build 3083 (identities `FM-1_9673083` and `SMK-37 Pro_9653083`). The host test suite is the main regression check; see [Build and test](#build-and-test). Release notes are in [docs/RELEASE-1.0b.md](docs/RELEASE-1.0b.md) and the changelog is in [docs/CHANGELOG.md](docs/CHANGELOG.md).
+This tree is JamesOS 1.0b, build 3110 (identities `FM-1_9673110` and `SMK-37 Pro_9653110`). The host test suite is the main regression check; see [Build and test](#build-and-test). Release notes are in [docs/RELEASE-1.0b.md](docs/RELEASE-1.0b.md) and the changelog is in [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
-Memory budgets, measured on build 3082 (3083 should be within a few hundred bytes):
+Memory budgets of build 3110:
 
 | Budget | FM-1 | SMK-37 Pro |
 | --- | --- | --- |
-| Application image | 497,072 of 581,564 B | 509,228 of 619,520 B |
-| `.data` + `.bss` | 84,848 of 98,304 B | 85,776 of 98,304 B |
-| Designated pool | 342,960 of 344,064 B | 343,344 of 344,064 B |
-| RAM code | 31,328 of 32,512 B | 32,076 of 32,512 B |
+| Application image | 513,184 of 581,564 B | 526,036 of 619,520 B |
+| `.data` + `.bss` | 85,568 of 98,304 B | 86,112 of 98,304 B |
+| Designated pool | 342,984 of 344,064 B | 343,368 of 344,064 B |
+| RAM code | 31,436 of 32,512 B | 32,188 of 32,512 B |
 
 Reading the DX7 banks from flash recovered about 12 KB of data memory on both products.
 
@@ -55,8 +55,8 @@ Reading the DX7 banks from flash recovered about 12 KB of data memory on both pr
 
 | Product | Device | Build selection | Status |
 | --- | --- | --- | --- |
-| JamesOS | M-VAVE FM-1 | `tools/build.py --target fm1` | Build 3083. |
-| JamesOS-K | M-VAVE SMK-37 Pro | `tools/build.py --target smk37` | Build 3083. Its button layout is described in [docs/SMK37-PORT.md](docs/SMK37-PORT.md). |
+| JamesOS | M-VAVE FM-1 | `tools/build.py --target fm1` | Build 3110. |
+| JamesOS-K | M-VAVE SMK-37 Pro | `tools/build.py --target smk37` | Build 3110. Its button layout is described in [docs/SMK37-PORT.md](docs/SMK37-PORT.md). |
 
 ## Projects and compatibility
 

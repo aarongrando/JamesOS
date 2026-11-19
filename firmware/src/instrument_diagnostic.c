@@ -725,6 +725,32 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
         br_diagnostic_word(reply + 20u, 0u);
 #endif
         *reply_n = 24u;
+#if BR_AUDIO_TRACE && defined(FM1_DEVICE)
+    } else if (cmd == 0xBBu && n == 4u) {
+        /* One trace record after sequence S (body: S as u32 LE; 0 = the oldest there is): the 124-byte
+         * record of instrument_trace.c (first word = its sequence; if S fell out of the ring this is the
+         * oldest available, so the host sees the gap), or 'NONE' + the newest sequence seen (8 bytes). */
+        uint32_t after = (uint32_t)body[0] | (uint32_t)body[1] << 8 | (uint32_t)body[2] << 16 | (uint32_t)body[3] << 24;
+        uint32_t got = br_audio_trace_read(after, reply);
+        if (!got) {
+            reply[0] = 'N'; reply[1] = 'O'; reply[2] = 'N'; reply[3] = 'E';
+            br_diagnostic_word(reply + 4u, fm1_audio_metrics.blocks);
+            got = 8u;
+        }
+        *reply_n = got;
+#endif
+#if BR_IDLE_STAGE_TICKS && defined(FM1_DEVICE)
+    } else if (cmd == 0xB9u && !n) {
+        /* Idle-stage ticks, 26 words (104 bytes): 24 averages (ticks, exponential over 64 halves), the worst
+         * whole window, the halves counted. Word i (0..20) = stamp i+1 minus stamp i; the stamps are listed in
+         * idle_stage_ticks.h. Word 21 = whole window, 22 = CPU1 stream-job pickup latency (stamp 22 minus 18; 0
+         * if no stream job ran), 23 = CPU1 pre hook + master begin_block, 24 = worst whole window (cleared by
+         * 0x61), 25 = halves counted. */
+        uint32_t words[26];
+        br_idle_stage_snapshot(words);
+        for (i = 0; i < 26u; ++i) br_diagnostic_word(reply + 4u * i, words[i]);
+        *reply_n = 104u;
+#endif
     } else if (cmd == 0xA0u && !n) {
         /* Versioned read-only SAVE/restore protection status. Unknown flags
          * must be treated as protected by clients. */

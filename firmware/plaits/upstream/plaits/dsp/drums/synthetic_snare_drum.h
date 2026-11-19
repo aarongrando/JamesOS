@@ -91,13 +91,14 @@ class SyntheticSnareDrum {
       // plus one Newton step gives about 0.255% maximum reciprocal error over
       // [1, 4]. Keep the exact divide for unusual out-of-range phases.
       uint32_t bits;
-      __asm__ volatile("" : "+m"(denominator) : : "memory");
       __builtin_memcpy(&bits, &denominator, sizeof(bits));
       bits = 0x7ef311c3u - bits;
       float reciprocal;
       __builtin_memcpy(&reciprocal, &bits, sizeof(reciprocal));
-      __asm__ volatile("" : "+m"(reciprocal) : : "memory");
       reciprocal *= 2.0f - denominator * reciprocal;
+      // Keep the rounded Newton result in a register before applying gain.
+      // Reassociation across this point can change the oscillator waveform.
+      __asm__ volatile("" : "+r"(reciprocal));
       return (2.0f * triangle) * reciprocal;
     }
 #endif

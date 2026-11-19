@@ -62,12 +62,21 @@ class LPCSpeechSynth {
 
   void Init();
   
+  float ExcitationFrequency(float prosody_amount, float pitch_shift) const;
+
+  void RenderSample(float f, float* excitation, float* output);
+
   void Render(
       float prosody_amount,
       float pitch_shift,
       float* excitation,
       float* output,
-      size_t size);
+      size_t size) {
+    const float f = ExcitationFrequency(prosody_amount, pitch_shift);
+    while (size--) {
+      RenderSample(f, excitation++, output++);
+    }
+  }
   
   void PlayFrame(const Frame* frames, float frame, bool interpolate) {
     MAKE_INTEGRAL_FRACTIONAL(frame);

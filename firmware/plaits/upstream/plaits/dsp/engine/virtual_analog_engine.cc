@@ -186,8 +186,8 @@ void VirtualAnalogEngine::Render(
   CONSTRAIN(pw, 0.5f, 0.995f);
   
   // Render monster sync to AUX.
-  primary_.Render(primary_f, primary_sync_f, pw, shape, out, size);
-  auxiliary_.Render(auxiliary_f, auxiliary_sync_f, pw, shape, aux, size);
+  primary_.RenderDualWave(primary_f, primary_sync_f, pw, shape, out, size);
+  auxiliary_.RenderDualWave(auxiliary_f, auxiliary_sync_f, pw, shape, aux, size);
   for (size_t i = 0; i < size; ++i) {
     aux[i] = (aux[i] - out[i]) * 0.5f;
   }
@@ -217,7 +217,7 @@ void VirtualAnalogEngine::Render(
   const float square_sync_f = NoteToFrequency(
       parameters.note + square_sync_ratio);
   
-  sync_.Render(
+  sync_.RenderDualWave(
       primary_f, square_sync_f, square_pw, 1.0f, temp_buffer_, size);
   variable_saw_.Render(auxiliary_f, saw_pw, saw_shape, out, size);
   

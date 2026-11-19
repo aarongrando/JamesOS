@@ -120,39 +120,56 @@ inline float TerrainLookupWT(float x, float y, int bank) {
   return (xy[0] + (xy[1] - xy[0]) * wt_fractional) * value_scale;
 }
 
+// With positive phase and a power-of-two table size, scaling before
+// wrapping preserves the fractional cell position exactly.
+inline float TerrainSine(float phase) {
+  const float cell = phase * kSineLUTSize;
+  MAKE_INTEGRAL_FRACTIONAL(cell);
+  const int index = cell_integral & ((1 << kSineLUTBits) - 1);
+  const float a = lut_sine[index];
+  const float b = lut_sine[index + 1];
+  return a + (b - a) * cell_fractional;
+}
+
 inline float Squash(float x, float a) {
   x *= a;
   return x / (1.0f + __builtin_fabsf(x));
 }
 
-inline float WaveTerrainEngine::Terrain(float x, float y, int terrain_index) {
+namespace {
+
+template<int terrain_index>
+inline float Terrain(float x, float y, const int8_t* user_terrain) {
   // The Sine function only works for a positive argument.
   // Thus, all calls to Sine include a positive offset of the argument!
   const float k = 4.0f;
   switch (terrain_index) {
     case 0:
       {
-        return (Squash(Sine(k + x * 1.273f), 2.0f) - \
-            Sine(k + y * (x + 1.571f) * 0.637f)) * 0.57f;
+        return (Squash(TerrainSine(k + x * 1.273f), 2.0f) - \
+            TerrainSine(k + y * (x + 1.571f) * 0.637f)) * 0.57f;
       }
       break;
     case 1:
       {
         const float xy = x * y;
-        return Sine(k + Sine(k + (x + y) * 0.637f) / (0.2f + xy * xy) * 0.159f);
+        return TerrainSine(k + TerrainSine(k + (x + y) * 0.637f) /
+            (0.2f + xy * xy) * 0.159f);
       }
       break;
     case 2:
       {
         const float xy = x * y;
-        return Sine(k + Sine(k + 2.387f * xy) / (0.350f + xy * xy) * 0.159f);
+        return TerrainSine(k + TerrainSine(k + 2.387f * xy) /
+            (0.350f + xy * xy) * 0.159f);
       }
       break;
     case 3:
       {
-        const float xy = x * y;
+        // Preserve the rounded x*y before the relaxed compiler moves the scale.
+        const volatile float xy = x * y;
         const float xys = (x - 0.25f) * (y + 0.25f);
-        return Sine(k + xy / (2.0f + __builtin_fabsf(5.0f * xys)) * 6.366f);
+        return TerrainSine(k + xy / (2.0f + __builtin_fabsf(5.0f * xys)) * 6.366f);
       }
       break;
     case 4:
@@ -171,11 +188,44 @@ inline float WaveTerrainEngine::Terrain(float x, float y, int terrain_index) {
       break;
     case 8:
       {
-        return TerrainLookup(x, y, user_terrain_);
+        return TerrainLookup(x, y, user_terrain);
       }
+    default:
+      return 0.0f;
   }
-  return 0.0f;
 }
+
+struct TerrainValues {
+  float first;
+  float second;
+};
+
+template<int index>
+TerrainValues EvaluateSurface(
+    float x0, float y0, float x1, float y1, const int8_t* user_terrain) {
+  TerrainValues samples = {
+    Terrain<index>(x0, y0, user_terrain),
+    Terrain<index>(x1, y1, user_terrain)
+  };
+  return samples;
+}
+
+typedef TerrainValues (*Surface)(float, float, float, float, const int8_t*);
+const Surface surfaces[] = {
+  EvaluateSurface<0>, EvaluateSurface<1>, EvaluateSurface<2>, EvaluateSurface<3>,
+  EvaluateSurface<4>, EvaluateSurface<5>, EvaluateSurface<6>, EvaluateSurface<7>,
+  EvaluateSurface<8>
+};
+
+inline Surface GetSurface(int index) {
+  // Match Terrain's silent default for an out-of-range surface.
+  if (static_cast<unsigned>(index) >= sizeof(surfaces) / sizeof(surfaces[0])) {
+    return EvaluateSurface<-1>;
+  }
+  return surfaces[index];
+}
+
+}  // namespace
 
 void WaveTerrainEngine::Render(
     const EngineParameters& parameters,
@@ -213,19 +263,28 @@ void WaveTerrainEngine::Render(
     const float z = terrain.Next();
     MAKE_INTEGRAL_FRACTIONAL(z);
 
+    const float x_scale = 1.0f - __builtin_fabsf(x_offset);
+    const float x0 = path_x[ij] * x_scale + x_offset;
+    const float x1 = path_x[ij + 1] * x_scale + x_offset;
+    const float y0 = path_y[ij];
+    const float y1 = path_y[ij + 1];
+    ij += kOversampling;
+
+    // The two oversamples share the same pair of neighboring surfaces.
+    const TerrainValues low =
+        GetSurface(z_integral)(x0, y0, x1, y1, user_terrain_);
+    const TerrainValues high =
+        GetSurface(z_integral + 1)(x0, y0, x1, y1, user_terrain_);
+    // Keep the native per-oversample accumulation order under relaxed FP.
+    const float lower[] = { low.first, low.second };
+    const float upper[] = { high.first, high.second };
+    const float ys[] = { y0, y1 };
     float out_s = 0.0f;
     float aux_s = 0.0f;
-    
     for (size_t j = 0; j < kOversampling; ++j) {
-      const float x = path_x[ij] * (1.0f - __builtin_fabsf(x_offset)) + x_offset;
-      const float y = path_y[ij];
-      ++ij;
-      
-      const float z0 = Terrain(x, y, z_integral);
-      const float z1 = Terrain(x, y, z_integral + 1);
-      const float z = (z0 + (z1 - z0) * z_fractional);
+      const float z = lower[j] + (upper[j] - lower[j]) * z_fractional;
       out_s += z;
-      aux_s += y + z;
+      aux_s += ys[j] + z;
     }
     out[i] = kScale * out_s;
     aux[i] = Sine(1.0f + 0.5f * kScale * aux_s);

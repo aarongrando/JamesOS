@@ -216,7 +216,9 @@ int main(int argc, char **argv)
         fail("selected kit sidechain was not active and nonzero");
     put(output, sizeof output);
     put(bus, sizeof bus);
-    put(br_comp_key, sizeof br_comp_key);
+    /* Only the kit part's key row is ever read (a synth part's row is dead since BR_IDLE_SKIP_COMP_KEY_CLEAR no
+     * longer clears all four every block); the kit row is overwritten in full by its finalizer each frame. */
+    put(br_comp_key[BR_DRUM_PART], sizeof br_comp_key[BR_DRUM_PART]);
     put(br_audio_kit_partial, sizeof br_audio_kit_partial);
     put(br_audio_kit_key_partial[0][key_lane],
         sizeof br_audio_kit_key_partial[0][key_lane]);
@@ -228,7 +230,9 @@ int main(int argc, char **argv)
     full_frame();
     put(output, sizeof output);
     put(bus, sizeof bus);
-    put(br_comp_key, sizeof br_comp_key);
+    /* Only the kit part's key row is ever read (a synth part's row is dead since BR_IDLE_SKIP_COMP_KEY_CLEAR no
+     * longer clears all four every block); the kit row is overwritten in full by its finalizer each frame. */
+    put(br_comp_key[BR_DRUM_PART], sizeof br_comp_key[BR_DRUM_PART]);
     put(br_audio_fused_osc_block, sizeof br_audio_fused_osc_block);
     put(br_fx_track_stereo, sizeof br_fx_track_stereo);
 

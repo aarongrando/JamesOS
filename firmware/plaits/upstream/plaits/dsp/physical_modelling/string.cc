@@ -137,53 +137,73 @@ void String::ProcessInternal(
   
   float ap_gain = -0.618f * non_linearity_amount / (0.15f + __builtin_fabsf(non_linearity_amount));
   
-  while (size--) {
-    src_phase_ += src_ratio;
-    if (src_phase_ > 1.0f) {
-      src_phase_ -= 1.0f;
-      
-      float delay = delay_modulation.Next();
-      float s = 0.0f;
-      
-      if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
-        float noise = Random::GetFloat() - 0.5f;
-        ONE_POLE(dispersion_noise_, noise, noise_filter)
-        delay *= 1.0f + dispersion_noise_ * noise_amount;
-      } else {
-        delay *= 1.0f - curved_bridge_ * bridge_curving;
-      }
-      
-      if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
-        float ap_delay = delay * stretch_point;
-        float main_delay = delay - ap_delay * (0.408f - stretch_point * 0.308f) * stretch_correction;
-        if (ap_delay >= 4.0f && main_delay >= 4.0f) {
-          s = string_.Read(main_delay);
-          s = stretch_.Allpass(s, ap_delay, ap_gain);
+  // A freshly rotated pitch-history slot can be zero. No resonator step
+  // occurs in this block, and the interpolated output is constant.
+  if (src_ratio == 0.0f) {
+    const float held = Crossfade(out_sample_[1], out_sample_[0], src_phase_);
+    while (size--) {
+      *out++ += held;
+    }
+    return;
+  }
+
+  // At the snapped rate (1 + 1) - 1 is exactly 1 on every frame.
+  // Use the stored phase operand to retain the rounded crossfade.
+  const float full_phase = src_phase_;
+  auto render = [&](bool full_rate) __attribute__((always_inline)) {
+    while (size--) {
+      if (!full_rate) src_phase_ += src_ratio;
+      if (full_rate || src_phase_ > 1.0f) {
+        if (!full_rate) src_phase_ -= 1.0f;
+
+        float delay = delay_modulation.Next();
+        float s = 0.0f;
+
+        if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
+          float noise = Random::GetFloat() - 0.5f;
+          ONE_POLE(dispersion_noise_, noise, noise_filter)
+          delay *= 1.0f + dispersion_noise_ * noise_amount;
+        } else {
+          delay *= 1.0f - curved_bridge_ * bridge_curving;
+        }
+
+        if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
+          float ap_delay = delay * stretch_point;
+          float main_delay = delay - ap_delay * (0.408f - stretch_point * 0.308f) * stretch_correction;
+          if (ap_delay >= 4.0f && main_delay >= 4.0f) {
+            s = string_.Read(main_delay);
+            s = stretch_.Allpass(s, ap_delay, ap_gain);
+          } else {
+            s = string_.ReadHermite(delay);
+          }
         } else {
           s = string_.ReadHermite(delay);
         }
-      } else {
-        s = string_.ReadHermite(delay);
-      }
-      
-      if (non_linearity == STRING_NON_LINEARITY_CURVED_BRIDGE) {
-        float value = __builtin_fabsf(s) - 0.025f;
-        float sign = s > 0.0f ? 1.0f : -1.5f;
-        curved_bridge_ = (__builtin_fabsf(value) + value) * sign;
-      }
-    
-      s += *in;
-      CONSTRAIN(s, -20.0f, +20.0f);
-      
-      dc_blocker_.Process(&s, 1);
-      s = iir_damping_filter_.Process<FILTER_MODE_LOW_PASS>(s);
-      string_.Write(s);
 
-      out_sample_[1] = out_sample_[0];
-      out_sample_[0] = s;
+        if (non_linearity == STRING_NON_LINEARITY_CURVED_BRIDGE) {
+          float value = __builtin_fabsf(s) - 0.025f;
+          float sign = s > 0.0f ? 1.0f : -1.5f;
+          curved_bridge_ = (__builtin_fabsf(value) + value) * sign;
+        }
+
+        s += *in;
+        CONSTRAIN(s, -20.0f, +20.0f);
+
+        dc_blocker_.Process(&s, 1);
+        s = iir_damping_filter_.Process<FILTER_MODE_LOW_PASS>(s);
+        string_.Write(s);
+
+        out_sample_[1] = out_sample_[0];
+        out_sample_[0] = s;
+      }
+      *out++ += Crossfade(out_sample_[1], out_sample_[0], full_rate ? full_phase : src_phase_);
+      in++;
     }
-    *out++ += Crossfade(out_sample_[1], out_sample_[0], src_phase_);
-    in++;
+  };
+  if (src_ratio == 1.0f) {
+    render(true);
+  } else {
+    render(false);
   }
 }
 

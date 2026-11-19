@@ -461,11 +461,27 @@ void Resonator::Process(
         process_input, low_input, low_output, high_output, low_size, size);
     MixMultirateOutputs(low_output, high_output, out, size, low_size);
 #else
+#if FM1_MODAL_CACHE_AOS && FM1_MODAL_PERSISTENT_FLOAT_DIRECT_CACHE_HIT
+    // Check the excitation once for all mode batches. If output can overwrite
+    // input, later batches must still read the values produced by earlier ones.
+    const uintptr_t src = reinterpret_cast<uintptr_t>(process_input);
+    const uintptr_t dst = reinterpret_cast<uintptr_t>(out);
+    const bool disjoint = (src < dst ? dst - src : src - dst) >= size * sizeof(float);
+    uint32_t bits = 0;
+    if (disjoint) {
+      for (size_t j = 0; j < size; ++j) bits |= FloatBits(process_input[j]);
+    }
+    const bool zero_block = disjoint && bits == 0;
+#endif
     for (int batch = 0; batch < resolution_ / kModeBatchSize; ++batch) {
       const int offset = batch * kModeBatchSize;
 #if FM1_MODAL_CACHE_AOS
       mode_filters_[batch].ProcessCached<FILTER_MODE_BAND_PASS, true>(
-          &coefficient_cache_[offset], process_input, out, size);
+          &coefficient_cache_[offset], process_input, out, size
+#if FM1_MODAL_PERSISTENT_FLOAT_DIRECT_CACHE_HIT
+          , zero_block
+#endif
+          );
 #else
       mode_filters_[batch].ProcessCached<FILTER_MODE_BAND_PASS, true>(
           &coefficient_g_[offset],

@@ -57,6 +57,7 @@ class AnalogSnareDrum {
     pulse_lp_ = 0.0f;
     noise_envelope_ = 0.0f;
     sustain_gain_ = 0.0f;
+    filter_key_valid_ = false;
 #if FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
     decay_coefficients_cached_ = false;
 #endif
@@ -107,6 +108,13 @@ class AnalogSnareDrum {
     const int kTriggerPulseDuration = 1.0e-3f * kSampleRate;
     const float kPulseDecayTime = 0.1e-3f * kSampleRate;
 #if FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
+    uint32_t decay_bits, previous_decay_bits = 0;
+    __builtin_memcpy(&decay_bits, &decay, sizeof(decay_bits));
+    if (decay_coefficients_cached_) {
+      __builtin_memcpy(&previous_decay_bits, &cached_decay_, sizeof(previous_decay_bits));
+    }
+    const bool same_decay = decay_coefficients_cached_ &&
+        decay == cached_decay_ && decay_bits == previous_decay_bits;
     if (!decay_coefficients_cached_ || cached_decay_ != decay ||
         cached_snappy_ != snappy) {
       cached_decay_ = decay;
@@ -159,11 +167,28 @@ class AnalogSnareDrum {
     float f[kNumModes];
     float gain[kNumModes];
     
+    // Each private filter keeps its coefficients between calls.  A matching
+    // pair makes every individual coefficient-cache lookup a hit as well.
+    uint32_t f0_bits;
+    __builtin_memcpy(&f0_bits, &f0, sizeof(f0_bits));
+#if FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
+    const bool filters_changed = !filter_key_valid_ ||
+        filter_f0_bits_ != f0_bits || !same_decay;
+#else
+    uint32_t q_bits;
+    __builtin_memcpy(&q_bits, &q, sizeof(q_bits));
+    const bool filters_changed = !filter_key_valid_ ||
+        filter_f0_bits_ != f0_bits || filter_q_bits_ != q_bits;
+#endif
     for (int i = 0; i < kNumModes; ++i) {
-      f[i] = std::min(f0 * kModeFrequencies[i], 0.499f);
-      resonator_[i].set_f_q<stmlib::FREQUENCY_FAST>(
-          f[i],
-          1.0f + f[i] * (i == 0 ? q : q * 0.25f));
+      if (sustain || filters_changed) {
+        f[i] = std::min(f0 * kModeFrequencies[i], 0.499f);
+      }
+      if (filters_changed) {
+        resonator_[i].set_f_q<stmlib::FREQUENCY_FAST>(
+            f[i],
+            1.0f + f[i] * (i == 0 ? q : q * 0.25f));
+      }
     }
     
     if (tone < 0.666667f) {
@@ -183,10 +208,17 @@ class AnalogSnareDrum {
       }
     }
 
-    float f_noise = f0 * 16.0f;
-    CONSTRAIN(f_noise, 0.0f, 0.499f);
-    noise_filter_.set_f_q<stmlib::FREQUENCY_FAST>(
-        f_noise, 1.0f + f_noise * 1.5f);
+    if (filters_changed) {
+      float f_noise = f0 * 16.0f;
+      CONSTRAIN(f_noise, 0.0f, 0.499f);
+      noise_filter_.set_f_q<stmlib::FREQUENCY_FAST>(
+          f_noise, 1.0f + f_noise * 1.5f);
+      filter_f0_bits_ = f0_bits;
+#if !FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
+      filter_q_bits_ = q_bits;
+#endif
+      filter_key_valid_ = true;
+    }
         
     
     stmlib::ParameterInterpolator sustain_gain(
@@ -254,6 +286,10 @@ class AnalogSnareDrum {
   float pulse_lp_;
   float noise_envelope_;
   float sustain_gain_;
+  uint32_t filter_f0_bits_;
+#if !FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
+  uint32_t filter_q_bits_;
+#endif
 #if FM1_PLAITS_DRUM_CACHE_COEFFICIENTS
   float cached_decay_;
   float cached_snappy_;
@@ -261,6 +297,7 @@ class AnalogSnareDrum {
   float cached_noise_decay_ratio_;
   bool decay_coefficients_cached_;
 #endif
+  bool filter_key_valid_;
   
   stmlib::Svf resonator_[kNumModes];
   stmlib::Svf noise_filter_;

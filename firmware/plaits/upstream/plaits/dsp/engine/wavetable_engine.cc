@@ -42,6 +42,11 @@ const int kNumWavesPerBank = 64;
 const int kNumWaves = 192;
 const int kNumCustomWaves = 15;
 
+// One extra bank mirrors the top Z endpoint; one extra row extends the last
+// Y endpoint. Ordinary flat indices retain the original map ordering.
+const int kMapPrefix = kNumWavesPerBank;
+const int kMapTail = 9;
+
 const size_t kTableSize = 128;
 const float kTableSizeF = float(kTableSize);
 
@@ -63,7 +68,8 @@ PLAITS_COLD_INIT_ATTR void WavetableEngine::Init(BufferAllocator* allocator) {
 
   diff_out_.Init();
   
-  wave_map_ = allocator->Allocate<const int16_t*>(kNumWavesPerBank);
+  const int map_size = kMapPrefix + kNumBanks * kNumWavesPerBank + kMapTail;
+  wave_map_ = allocator->Allocate<const int16_t*>(map_size) + kMapPrefix;
 }
 
 PLAITS_COLD_INIT_ATTR void WavetableEngine::Reset() {
@@ -88,6 +94,12 @@ void WavetableEngine::LoadUserData(const uint8_t* user_data) {
       wave_map_[i] = base + size_t(w) * (kTableSize + 4);
     }
   }
+  // The rounded modulation ramps can reach or slightly exceed the final
+  // coordinate. A folded neighbor at bank -1 uses bank zero at the same X/Y.
+  std::copy(wave_map_, wave_map_ + kMapPrefix, wave_map_ - kMapPrefix);
+  const int end = kNumBanks * kNumWavesPerBank;
+  std::copy(wave_map_ + end - 8, wave_map_ + end, wave_map_ + end);
+  wave_map_[end + 8] = wave_map_[end - 1];
 }
 
 inline float Clamp(float x, float amount) {
@@ -98,16 +110,19 @@ inline float Clamp(float x, float amount) {
   return x;
 }
 
-inline float WavetableEngine::ReadWave(
-    int x,
-    int y,
-    int z,
-    int phase_integral,
-    float phase_fractional) {
-  return InterpolateWaveHermite(
-      wave_map_[x + y * 8 + z * kNumWavesPerBank],
-      phase_integral,
-      phase_fractional);
+// The four int16 samples yield exactly representable doubled coefficients.
+// Carry that factor of two through Horner's first two rounded stages, then
+// remove it in the third product. This also holds for full-range user waves.
+static inline float ReadCubic(const int16_t* wave, int p, float f) {
+  const int xm1 = wave[p];
+  const int x0 = wave[p + 1];
+  const int x1 = wave[p + 2];
+  const int x2 = wave[p + 3];
+  const int v = x0 - x1;
+  const int c2 = x1 - xm1;
+  const int a2 = 3 * v + x2 - xm1;
+  const int b2 = c2 + 2 * v + a2;
+  return ((a2 * f - b2) * f + c2) * (f * 0.5f) + x0;
 }
 
 void WavetableEngine::Render(
@@ -175,9 +190,7 @@ void WavetableEngine::Render(
     
     {
       int x0 = x_integral;
-      int x1 = x_integral + 1;
       int y0 = y_integral;
-      int y1 = y_integral + 1;
       int z0 = z_integral;
       int z1 = z_integral + 1;
       
@@ -188,22 +201,24 @@ void WavetableEngine::Render(
         z1 = 7 - z1;
       }
       
-      float x0y0z0 = ReadWave(x0, y0, z0, p_integral, p_fractional);
-      float x1y0z0 = ReadWave(x1, y0, z0, p_integral, p_fractional);
+      const int16_t* const* lo = wave_map_ + z0 * 64 + y0 * 8 + x0;
+      const int16_t* const* hi = wave_map_ + z1 * 64 + y0 * 8 + x0;
+      float x0y0z0 = ReadCubic(lo[0], p_integral, p_fractional);
+      float x1y0z0 = ReadCubic(lo[1], p_integral, p_fractional);
       float xy0z0 = x0y0z0 + (x1y0z0 - x0y0z0) * x_fractional;
 
-      float x0y1z0 = ReadWave(x0, y1, z0, p_integral, p_fractional);
-      float x1y1z0 = ReadWave(x1, y1, z0, p_integral, p_fractional);
+      float x0y1z0 = ReadCubic(lo[8], p_integral, p_fractional);
+      float x1y1z0 = ReadCubic(lo[9], p_integral, p_fractional);
       float xy1z0 = x0y1z0 + (x1y1z0 - x0y1z0) * x_fractional;
 
       float xyz0 = xy0z0 + (xy1z0 - xy0z0) * y_fractional;
 
-      float x0y0z1 = ReadWave(x0, y0, z1, p_integral, p_fractional);
-      float x1y0z1 = ReadWave(x1, y0, z1, p_integral, p_fractional);
+      float x0y0z1 = ReadCubic(hi[0], p_integral, p_fractional);
+      float x1y0z1 = ReadCubic(hi[1], p_integral, p_fractional);
       float xy0z1 = x0y0z1 + (x1y0z1 - x0y0z1) * x_fractional;
 
-      float x0y1z1 = ReadWave(x0, y1, z1, p_integral, p_fractional);
-      float x1y1z1 = ReadWave(x1, y1, z1, p_integral, p_fractional);
+      float x0y1z1 = ReadCubic(hi[8], p_integral, p_fractional);
+      float x1y1z1 = ReadCubic(hi[9], p_integral, p_fractional);
       float xy1z1 = x0y1z1 + (x1y1z1 - x0y1z1) * x_fractional;
       
       float xyz1 = xy0z1 + (xy1z1 - xy0z1) * y_fractional;

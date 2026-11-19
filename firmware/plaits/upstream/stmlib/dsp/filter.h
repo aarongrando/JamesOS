@@ -426,6 +426,46 @@ class Svf {
     state_2_ = state_2;
   }
   
+  // The arithmetic of Process(in, out, size), operation for operation, with
+  // the three coefficients read once. In Process the compiler must assume a
+  // store through out can change g_, r_ and h_ (all are floats) and reloads
+  // them for every sample.
+  template<FilterMode mode>
+  inline void ProcessLocalCoefficients(
+      const float* in, float* out, size_t size) {
+    float hp, bp, lp;
+    float state_1 = state_1_;
+    float state_2 = state_2_;
+    const float g = g_;
+    const float r = r_;
+    const float h = h_;
+
+    while (size--) {
+      hp = (*in - r * state_1 - g * state_1 - state_2) * h;
+      bp = g * hp + state_1;
+      state_1 = g * hp + bp;
+      lp = g * bp + state_2;
+      state_2 = g * bp + lp;
+
+      float value;
+      if (mode == FILTER_MODE_LOW_PASS) {
+        value = lp;
+      } else if (mode == FILTER_MODE_BAND_PASS) {
+        value = bp;
+      } else if (mode == FILTER_MODE_BAND_PASS_NORMALIZED) {
+        value = bp * r;
+      } else if (mode == FILTER_MODE_HIGH_PASS) {
+        value = hp;
+      }
+
+      *out = value;
+      ++out;
+      ++in;
+    }
+    state_1_ = state_1;
+    state_2_ = state_2;
+  }
+
   template<FilterMode mode>
   inline void ProcessAdd(const float* in, float* out, size_t size, float gain) {
     float hp, bp, lp;

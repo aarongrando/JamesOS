@@ -143,6 +143,10 @@ class AdditiveSawOscillator {
       float level,
       float* out,
       size_t size) {
+    // At high pitch the phase wraps too often to amortize a whole-block test.
+    if (frequency < 0.0625f && TryNoWrap(frequency, level, out, size)) {
+      return;
+    }
     if (frequency >= kMaxFrequency) {
       frequency = kMaxFrequency;
     }
@@ -159,7 +163,7 @@ class AdditiveSawOscillator {
       const float frequency = fm.Next();
 
       phase += frequency;
-  
+
       if (phase >= 1.0f) {
         phase -= 1.0f;
         float t = phase / frequency;
@@ -175,6 +179,35 @@ class AdditiveSawOscillator {
   }
 
  private:
+  // Keep the original BLEP loop in the caller on the frequent-wrap path.
+  __attribute__((noinline)) bool TryNoWrap(
+      float frequency, float level, float* out, size_t size) {
+    const float high_frequency = frequency_ > frequency ? frequency_ : frequency;
+    // With at most 24 steps, 0.0001 exceeds the combined rounding error in
+    // frequency interpolation, repeated phase additions and this bound.
+    if (!size || size > kMaxBlockSize ||
+        phase_ + static_cast<float>(size) * high_frequency >= 0.9999f) {
+      return false;
+    }
+
+    stmlib::ParameterInterpolator fm(&frequency_, frequency, size);
+    stmlib::ParameterInterpolator gain(&gain_, level, size);
+    float phase = phase_;
+    *out++ += (2.0f * next_sample_ - 1.0f) * gain.Next();
+    phase += fm.Next();
+    // Relaxed FP can merge successive interpolation increments in an unroll.
+#if defined(__clang__)
+#pragma clang loop unroll(disable)
+#endif
+    while (--size) {
+      *out++ += (2.0f * phase - 1.0f) * gain.Next();
+      phase += fm.Next();
+    }
+    phase_ = phase;
+    next_sample_ = phase;
+    return true;
+  }
+
   // Oscillator state.
   float phase_;
   float next_sample_;

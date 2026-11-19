@@ -273,6 +273,27 @@ class Particle {
     float bp_r_plus_g = filter_.r() + filter_.g();
     float bp_two_g = 2.0f * filter_.g();
 #endif
+#if FM1_PARTICLE_FAST_RANDOM_GATE && FM1_PARTICLE_SHARED_GATE && \
+    FM1_PLAITS_PARTICLE_LOCAL_RNG && FM1_PARTICLE_FAST_BANDPASS && \
+    FM1_PARTICLE_SKIP_SILENT && FM1_PARTICLE_EXACT_RANDOM_GATE_THRESHOLD
+    // Consume samples before the first impulse in their original RNG order.
+    // Even a silent final frame must draw the next word.
+    if (!force_first_event && !density_always_triggers) {
+      const size_t frames = size;
+      if (pre_gain_ != 0.0f) {
+        size = RenderTailUntilEvent(out, size, bp_r_plus_g, bp_two_g, random_gate,
+                                    local_random_state, &random_word);
+      } else {
+        while (size && random_word > density_threshold) {
+          random_word = ParticleRandomWord(local_random_state) | density_gate_disable;
+          --size;
+        }
+      }
+      const size_t quiet = frames - size;
+      out += quiet;
+      aux += quiet;
+    }
+#endif
     while (size--) {
       float s = 0.0f;
 #if FM1_PARTICLE_FAST_RANDOM_GATE
@@ -358,6 +379,30 @@ class Particle {
   }
  
  private:
+#if FM1_PARTICLE_FAST_RANDOM_GATE && FM1_PARTICLE_SHARED_GATE && \
+    FM1_PLAITS_PARTICLE_LOCAL_RNG && FM1_PARTICLE_FAST_BANDPASS && \
+    FM1_PARTICLE_SKIP_SILENT && FM1_PARTICLE_EXACT_RANDOM_GATE_THRESHOLD
+  // The independent mix buffer lets both integrators stay in registers.
+  __attribute__((noinline)) size_t RenderTailUntilEvent(
+      float* __restrict out, size_t size, float r_plus_g, float two_g,
+      const ParticleRandomGate& gate, uint32_t* rng, uint32_t* next_word) {
+    // A runtime zero retains the same subtract/multiply contraction choices
+    // as the impulse path under the firmware's relaxed floating-point flags.
+    static const volatile float silence = 0.0f;
+    const float zero_input = silence;
+    uint32_t word = *next_word;
+    uint32_t state = *rng;
+    while (size && word > gate.threshold) {
+      *out++ += filter_.ProcessBandPassReduced(zero_input, r_plus_g, two_g);
+      word = ParticleRandomWord(&state) | gate.disable;
+      --size;
+    }
+    *rng = state;
+    *next_word = word;
+    return size;
+  }
+#endif
+
   float pre_gain_;
   stmlib::Svf filter_;
   

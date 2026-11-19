@@ -49,8 +49,6 @@ class WavetableEngine : public Engine {
       bool* already_enveloped);
   
  private:
-  float ReadWave(int x, int y, int z, int phase_i, float phase_f);
-   
   float phase_;
   
   float x_pre_lp_;

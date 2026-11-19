@@ -673,6 +673,10 @@ class HarmonicOscillator {
           float high_b2 = 0.0f;
           float companion_b1 = 0.0f;
           float companion_b2 = 0.0f;
+          // Two descending rows reuse the two Clenshaw history registers.
+#if defined(__clang__)
+#pragma clang loop unroll_count(2)
+#endif
           for (int i = num_harmonics - 1; i >= 0; --i) {
             const float low_b = amplitude_[i] + two_x * low_b1 - low_b2;
             const float high_b =
@@ -711,6 +715,10 @@ class HarmonicOscillator {
         float high_b2 = 0.0f;
         float companion_b1 = 0.0f;
         float companion_b2 = 0.0f;
+        // Two descending rows reuse the two Clenshaw history registers.
+#if defined(__clang__)
+#pragma clang loop unroll_count(2)
+#endif
         for (int i = num_harmonics - 1; i >= 0; --i) {
           amplitude_[i] += increment[i].low;
           high.amplitude_[i] += increment[i].high;

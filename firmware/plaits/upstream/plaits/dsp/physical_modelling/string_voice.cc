@@ -105,7 +105,8 @@ void StringVoice::Render(
     fill(&temp[0], &temp[size], 0.0f);
   }
   
-  excitation_filter_.Process<FILTER_MODE_LOW_PASS>(temp, temp, size);
+  // The allocator-owned excitation buffer cannot alias filter coefficients.
+  excitation_filter_.ProcessLocalCoefficients<FILTER_MODE_LOW_PASS>(temp, temp, size);
   for (size_t i = 0; i < size; ++i) {
     aux[i] += temp[i];
   }

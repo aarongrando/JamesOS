@@ -64,7 +64,7 @@ inline float SineNoWrap(float phase) {
 #if defined(FM1_DEVICE)
 __attribute__((always_inline))
 #endif
-inline float SinePM(uint32_t phase, float pm) {
+inline float SinePM(uint32_t phase, float pm, bool keep_phase_word = false) {
   const float max_uint32 = 4294967296.0f;
   const int max_index = 32;
   const float offset = float(max_index);
@@ -72,6 +72,13 @@ inline float SinePM(uint32_t phase, float pm) {
 
   phase += static_cast<uint32_t>((pm + offset) * scale) * max_index * 2;
   
+  // R3 otherwise maintains separate induction variables for the index and
+  // fraction of a modulated FM operator. Both use this same modulo-32-bit word.
+#if defined(__GNUC__)
+  if (keep_phase_word) {
+    __asm__("" : "+r"(phase));
+  }
+#endif
   uint32_t integral = phase >> (32 - kSineLUTBits);
   float fractional = static_cast<float>(phase << kSineLUTBits) / float(max_uint32);
   float a = lut_sine[integral];

@@ -34,3 +34,4 @@ int32_t br_comp_key[BR_PARTS][BR_BLOCK];
 #include "instrument_presets.c"
 #include "instrument_audio.c"
 #include "instrument_fx.c"
+#include "instrument_trace.c"

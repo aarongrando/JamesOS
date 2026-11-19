@@ -76,6 +76,41 @@ static void transitions(void)
     }
 }
 
+/* A level knob that selects a different track (the mixer, MIXER and KIT LEVEL) leaves the screen a clean full
+ * redraw of the new state would show, and costs far less than the whole screen (115,200 bytes). */
+static uint32_t select_bytes_worst;
+static void select_by_knob(const char *what, uint32_t page, uint32_t screen, uint32_t part, uint32_t from, uint32_t to)
+{
+    static uint16_t incremental[240 * 240];
+    br_ui.page = page; br_ui.screen[page] = screen; br_ui.part = part;
+    if (page == BR_PAGE_ROUTE) br_gate_select_lane(from); else br_ui.part = from;
+    br_ui.redraw = 1; br_draw_layout_old = 0xffffffffu;
+    lcd_fill(0, 0, 240, 240, BR_BACKGROUND); br_draw();
+    br_control_turn(to, 1);                           /* selects track (or lane) `to` and moves its level */
+    ui_test_lcd_pixel_bytes = 0;
+    br_ui.redraw = 1; br_draw();
+    if (ui_test_lcd_pixel_bytes > select_bytes_worst) select_bytes_worst = (uint32_t)ui_test_lcd_pixel_bytes;
+    memcpy(incremental, fb, sizeof incremental);
+    br_ui.redraw = 1; br_draw_layout_old = 0xffffffffu;
+    lcd_fill(0, 0, 240, 240, BR_BACKGROUND); br_draw();
+    if (memcmp(incremental, fb, sizeof fb)) { fprintf(stderr, "%s: %u -> %u differs from a clean redraw\n", what, from, to); abort(); }
+}
+static void selections(void)
+{
+    for (uint32_t from = 0; from < BR_PARTS; ++from)
+        for (uint32_t to = 0; to < BR_PARTS; ++to) {
+            if (from == to) continue;
+            select_by_knob("mixer", BR_PAGE_MIX, 0u, from, from, to);
+        }
+    for (uint32_t from = 0; from < BR_DRUM_LANES; ++from)
+        for (uint32_t to = 0; to < BR_DRUM_LANES; ++to) {
+            if (from == to) continue;
+            select_by_knob("kit level", BR_PAGE_ROUTE, 3u, BR_DRUM_PART, from, to);
+        }
+    printf("level knob selections: worst %u pixel bytes (budget 70,000)\n", select_bytes_worst);
+    if (select_bytes_worst > 70000u) { fprintf(stderr, "a selection change by a level knob sends too much\n"); abort(); }
+}
+
 int main(void)
 {
     br_app_init();
@@ -108,12 +143,24 @@ int main(void)
         }
     }
     br_load_preset(BR_DRUM_PART, BR_KIT_PLAITS);
+    /* Tracks that differ in what the pages show, so that a picture or value that does not follow the track is seen. */
+    for (uint32_t p = 0; p < BR_SYNTH_PARTS; ++p) {
+        br_load_preset(p, p * 9u + 3u);
+        br_part[p].sound.level = 30u + 40u * p; br_part[p].sound.filter = 20u + 35u * p;
+        br_part[p].sound.filter_resonance = 10u + 50u * p; br_part[p].sound.timbre = 15u + 45u * p;
+        br_part[p].sound.mute = p == 1u;
+    }
     check(BR_PAGE_HOME, 0);
     check(BR_PAGE_ENV, 0);
     check(BR_PAGE_MIX, 0);
     check(BR_PAGE_MIX, 1);
     check(BR_PAGE_SEQ, 0);
+    check(BR_PAGE_HOME, 1);
+    check(BR_PAGE_FX, 0);
+    check(BR_PAGE_LFO, 0);
+    check(BR_PAGE_ROUTE, 0);
     transitions();
+    selections();
     puts("PASS: track changes match clean redraws");
     return 0;
 }

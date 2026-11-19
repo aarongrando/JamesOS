@@ -150,6 +150,54 @@ class VariableShapeOscillator {
     static_assert(!hoist_constant_shape_controls ||
                       (!enable_sync && !output_phase),
                   "constant-shape hoist is only valid for free-running audio");
+    RenderImpl<enable_sync, output_phase, hoist_constant_shape_controls, false>(
+        master_frequency, frequency, pw, waveshape, phase_modulation_amount,
+        out, size);
+  }
+
+  // Both private PhaseDistortionEngine oscillators start at +0.0f
+  // waveshape and render only that shape for their entire lifetime.
+  template<bool enable_sync>
+  void RenderPhaseDistortion(
+      float master_frequency, float frequency, float pw,
+      float phase_modulation_amount, float* out, size_t size) {
+    RenderImpl<enable_sync, true, false, true>(
+        master_frequency, frequency, pw, 0.0f, phase_modulation_amount,
+        out, size);
+  }
+
+  // Dual Wave runs three synced oscillators. A ramp whose next rounded
+  // addition leaves the same bits will hold those bits for the entire call.
+  void RenderDualWave(float master_frequency, float frequency, float pw,
+                      float waveshape, float* out, size_t size) {
+    RenderImpl<true, false, false, false, kDetectHeld>(
+        master_frequency, frequency, pw, waveshape, 0.0f, out, size);
+  }
+
+  inline void set_master_phase(float master_phase) {
+    master_phase_ = master_phase;
+  }
+
+ private:
+  static inline bool Holds(float current, float target, size_t size) {
+    const float first = current + (target - current) / static_cast<float>(size);
+    uint32_t a, b;
+    __builtin_memcpy(&a, &current, sizeof(a));
+    __builtin_memcpy(&b, &first, sizeof(b));
+    return a == b;
+  }
+
+  enum SyncControlMode { kInterpolated, kDetectHeld, kHeld };
+
+
+  template<bool enable_sync, bool output_phase,
+           bool hoist_constant_shape_controls, bool phase_distortion_triangle,
+           SyncControlMode sync_control_mode = kInterpolated>
+  __attribute__((always_inline)) inline void RenderImpl(
+      float master_frequency, float frequency, float pw, float waveshape,
+      float phase_modulation_amount, float* out, size_t size) {
+    static_assert(!phase_distortion_triangle || output_phase,
+                  "phase distortion requires a phase output");
     if (master_frequency >= kMaxFrequency) {
       master_frequency = kMaxFrequency;
     }
@@ -162,7 +210,16 @@ class VariableShapeOscillator {
     } else {
       CONSTRAIN(pw, frequency * 2.0f, 1.0f - 2.0f * frequency);
     }
-    
+    constexpr bool held_sync_controls = sync_control_mode == kHeld;
+    if (sync_control_mode == kDetectHeld && size &&
+        Holds(master_frequency_, master_frequency, size) &&
+        Holds(slave_frequency_, frequency, size) && Holds(pw_, pw, size) &&
+        Holds(waveshape_, waveshape, size)) {
+      RenderImpl<true, false, false, false, kHeld>(
+          master_frequency, frequency, pw, waveshape, 0.0f, out, size);
+      return;
+    }
+
     stmlib::ParameterInterpolator master_fm(
         &master_frequency_, master_frequency, size);
     stmlib::ParameterInterpolator fm(&slave_frequency_, frequency, size);
@@ -184,8 +241,9 @@ class VariableShapeOscillator {
     float constant_slope_down = 0.0f;
     float constant_square_amount = 0.0f;
     float constant_triangle_amount = 0.0f;
-    if (hoist_constant_shape_controls && size != 0u &&
-        pw_ >= 0.5f && pw_ < 0.999f && pw >= 0.5f && pw < 0.999f) {
+    if ((hoist_constant_shape_controls || phase_distortion_triangle) &&
+        size != 0u && pw_ >= 0.5f && pw_ < 0.999f &&
+        pw >= 0.5f && pw < 0.999f) {
       const float first_pw = pwm.subsample(1.0f);
       uint32_t first_pw_bits = 0u;
       uint32_t current_pw_bits = 0u;
@@ -197,6 +255,14 @@ class VariableShapeOscillator {
         constant_slope_up = 1.0f / first_pw;
         constant_slope_down = 1.0f / (1.0f - first_pw);
       }
+    }
+    // The two PhaseDistortionEngine oscillators start at +0.0f and
+    // receive +0.0f on every call. Use the stored value for their crossfade
+    // weights: folding a literal triangle can change contracted FP results.
+    if (phase_distortion_triangle || held_sync_controls) {
+      constant_waveshape = true;
+      constant_square_amount = PLAITS_VSO_MAX(waveshape_ - 0.5f, 0.0f) * 2.0f;
+      constant_triangle_amount = PLAITS_VSO_MAX(1.0f - waveshape_ * 2.0f, 0.0f);
     }
     if (hoist_constant_shape_controls && size != 0u &&
         waveshape_ >= 0.5f && waveshape_ <= 1.001f &&
@@ -224,6 +290,12 @@ class VariableShapeOscillator {
     }
 #endif
 
+    if (held_sync_controls) {
+      constant_pw = true;
+      constant_slope_up = 1.0f / pw_;
+      constant_slope_down = 1.0f / (1.0f - pw_);
+    }
+
     float next_sample = next_sample_;
     
     while (size--) {
@@ -234,10 +306,11 @@ class VariableShapeOscillator {
       float this_sample = next_sample;
       next_sample = 0.0f;
     
-      const float master_frequency = master_fm.Next();
-      const float slave_frequency = fm.Next();
-      const float pw = pwm.Next();
-      const float waveshape = waveshape_modulation.Next();
+      const float master_frequency = held_sync_controls ? master_frequency_ : master_fm.Next();
+      const float slave_frequency = held_sync_controls ? slave_frequency_ : fm.Next();
+      const float pw = held_sync_controls ? pw_ : pwm.Next();
+      const float waveshape = (phase_distortion_triangle || held_sync_controls) ?
+          waveshape_ : waveshape_modulation.Next();
       
       const float square_amount = constant_waveshape ?
           constant_square_amount :
@@ -352,11 +425,6 @@ class VariableShapeOscillator {
     next_sample_ = next_sample;
   }
   
-  inline void set_master_phase(float master_phase) {
-    master_phase_ = master_phase;
-  }
-  
- private:
   PLAITS_VSO_VCF_INLINE float ComputeNaiveSample(
       float phase,
       float pw,

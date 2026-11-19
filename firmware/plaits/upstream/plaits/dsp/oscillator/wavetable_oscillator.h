@@ -115,6 +115,32 @@ class WavetableOscillator {
       const int16_t* const* wavetable,
       float* out,
       size_t size) {
+    RenderImpl<false>(frequency, amplitude, waveform, wavetable, out, size);
+  }
+
+  void RenderChord(
+      float frequency,
+      float amplitude,
+      float waveform,
+      const int16_t* const* wavetable,
+      float* __restrict out,
+      size_t size) {
+    if (waveform == 0.0f && waveform_ == 0.0f) {
+      RenderImpl<true>(frequency, amplitude, waveform, wavetable, out, size);
+    } else {
+      RenderImpl<false>(frequency, amplitude, waveform, wavetable, out, size);
+    }
+  }
+
+ private:
+  template<bool first_wave_only>
+  __attribute__((always_inline)) inline void RenderImpl(
+      float frequency,
+      float amplitude,
+      float waveform,
+      const int16_t* const* wavetable,
+      float* out,
+      size_t size) {
     CONSTRAIN(frequency, 0.0000001f, kMaxFrequency)
 
     if (attenuate_high_frequencies) {
@@ -149,20 +175,25 @@ class WavetableOscillator {
         phase -= 1.0f;
       }
       
-      const float waveform = waveform_modulation.Next();
-      MAKE_INTEGRAL_FRACTIONAL(waveform);
-      
       const float p = phase * float(wavetable_size);
       MAKE_INTEGRAL_FRACTIONAL(p);
-      
-      const float x0 = InterpolateWave(
-          wavetable[waveform_integral], p_integral, p_fractional);
-      const float x1 = InterpolateWave(
-          wavetable[waveform_integral + 1], p_integral, p_fractional);
-      
+
+      float sample;
+      if (first_wave_only) {
+        sample = InterpolateWave(wavetable[0], p_integral, p_fractional);
+      } else {
+        const float waveform = waveform_modulation.Next();
+        MAKE_INTEGRAL_FRACTIONAL(waveform);
+        const float x0 = InterpolateWave(
+            wavetable[waveform_integral], p_integral, p_fractional);
+        const float x1 = InterpolateWave(
+            wavetable[waveform_integral + 1], p_integral, p_fractional);
+        sample = x0 + (x1 - x0) * waveform_fractional;
+      }
+
       const float s = differentiator_.Process(
           cutoff,
-          (x0 + (x1 - x0) * waveform_fractional) * scale);
+          sample * scale);
       ONE_POLE(lp, s, cutoff);
       *out++ += amplitude_modulation.Next() * lp;
     }
@@ -170,7 +201,6 @@ class WavetableOscillator {
     phase_ = phase;
   }
 
- private:
   // Oscillator state.
   float phase_;
 

@@ -144,6 +144,7 @@ static __attribute__((noinline)) void bw_qline(int32_t x0, int32_t y0, int32_t x
     b[0] = ((x0 < x1 ? x0 : x1) - hw - 256) >> 8; b[2] = ((x0 < x1 ? x1 : x0) + hw + 256) >> 8;
     b[1] = ((y0 < y1 ? y0 : y1) - hw - 256) >> 8; b[3] = ((y0 < y1 ? y1 : y0) + hw + 256) >> 8;
     if (!hd__clip(b)) return;
+    hd_src_t src = hd_src(color);
     for (y = b[1]; y <= b[3]; ++y)
         for (x = b[0]; x <= b[2]; ++x) {
             int32_t a = hw - bw_seg_dist(x * 16 + 8 - ax, y * 16 + 8 - ay, dx, dy) + 128, p;
@@ -153,7 +154,7 @@ static __attribute__((noinline)) void bw_qline(int32_t x0, int32_t y0, int32_t x
                 if (p >= a) continue;
                 a = (a - p) * 255 / (255 - p);
             }
-            hd__px(x, y, color, a);
+            hd__pc(x, y, &src, a);
         }
 }
 static __attribute__((noinline)) void bw_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
@@ -211,6 +212,7 @@ static __attribute__((noinline)) void bw_path(const int32_t *px, const int32_t *
     b[0] = (b[0] - hw - 256) >> 8; b[1] = (b[1] - hw - 256) >> 8;
     b[2] = (b[2] + hw + 256) >> 8; b[3] = (b[3] + hw + 256) >> 8;
     if (!hd__clip(b)) return;                    /* (a strip this path misses costs nothing more) */
+    hd_src_t src = hd_src(color);
     for (i = 0; i < n; ++i) { qx[i] = hd__q4(px[i]); qy[i] = hd__q4(py[i]); len[i] = 0xffffu; }
     /* (segment lengths, q4 as bw_seg_dist takes them, are worked out for the segments a pixel asks about) */
     for (y = b[1]; y <= b[3]; ++y) {
@@ -250,7 +252,7 @@ static __attribute__((noinline)) void bw_path(const int32_t *px, const int32_t *
                     len[i] = (uint16_t)hd__isqrt((uint32_t)((qx[i + 1u] - ax) * (qx[i + 1u] - ax) + (qy[i + 1u] - ay) * (qy[i + 1u] - ay)));
                 d = bw_seg_near(x * 16 + 8 - ax, ry - ay, qx[i + 1u] - ax, qy[i + 1u] - ay, len[i], d);
             }
-            if (hw - d + 128 > 0) hd__px(x, y, color, hw - d + 128);
+            if (hw - d + 128 > 0) hd__pc(x, y, &src, hw - d + 128);
         }
     }
 }
@@ -263,6 +265,7 @@ static __attribute__((noinline)) void bw_area(const int32_t *px, const int32_t *
                                               int32_t a0, int32_t a1)
 {
     int32_t top = -cv_oy, bottom = top + (int32_t)cv_h - 1, k = a1 - a0 < 0 ? a0 - a1 : a1 - a0;
+    hd_src_t src = hd_src(color);
     for (uint32_t i = 0; i + 1u < n; ++i) {
         int32_t x0 = px[i], x1 = px[i + 1u], x = (x0 + 127) >> 8;
         int32_t ylo = py[i] < py[i + 1u] ? py[i] : py[i + 1u], yhi = py[i] + py[i + 1u] - ylo;
@@ -286,9 +289,12 @@ static __attribute__((noinline)) void bw_area(const int32_t *px, const int32_t *
             span *= dir; r = dir > 0 ? r0 : r1; step = dir;
             q = k * ((r * 256 + 128 - c) * dir); rem = q % span; q /= span;
             dq = k * 256 / span; dr = k * 256 % span;
-            for (int32_t left = r1 - r0; left >= 0; --left, r += step) {
+            /* (x is on the canvas and r0..r1 are within the strip: walk the column by pointer) */
+            uint16_t *p = hd__at(x, r);
+            const int32_t stride = step * (int32_t)cv_w;
+            for (int32_t left = r1 - r0; left >= 0; --left, p += stride) {
                 int32_t a = a1 < a0 ? a0 - q : a0 + q;
-                if (a > 0) hd__px(x, r, color, a);
+                if (a > 0) hd__pp(p, &src, a > 255 ? 255u : (uint32_t)a);
                 q += dq; rem += dr;
                 if (rem >= span) { rem -= span; ++q; }
             }

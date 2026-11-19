@@ -69,10 +69,10 @@ void PhaseDistortionEngine::Render(
   // Upsample by 2x
   float* synced = &temp_buffer_[0];
   float* free_running = &temp_buffer_[2 * size];
-  shaper_.Render<true, true>(
-      f0, modulator_f, pw, 0.0f, amount, synced, 2 * size);
-  modulator_.Render<false, true>(
-      f0, modulator_f, pw, 0.0f, amount, free_running, 2 * size);
+  shaper_.RenderPhaseDistortion<true>(
+      f0, modulator_f, pw, amount, synced, 2 * size);
+  modulator_.RenderPhaseDistortion<false>(
+      f0, modulator_f, pw, amount, free_running, 2 * size);
   
   for (size_t i = 0; i < size; ++i) {
     // Naive 0.5x downsampling.

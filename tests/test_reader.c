@@ -192,6 +192,16 @@ int main(void)
     turn(ENC_KNOB2, 1); run(300);
     CHECK(decode() == 1u && said[said_n - 1].flags == 0u);
 
+    /* 5b. the master filter cue: SELECT detents say nothing about the filter at once; the one cue, 0.8 s after the
+     * last change, is said once, at once */
+    run(2000); decode();
+    turn(ENC_SELECT, 1); run(60); turn(ENC_SELECT, 1); run(60); turn(ENC_SELECT, 1);
+    run(700); n = decode();
+    for (i = said_n - n; i < said_n; ++i) CHECK(strncmp(said[i].text, "MASTER FILTER", 13) != 0);
+    run(200); n = decode();
+    CHECK(n == 1u && !strncmp(said[said_n - 1].text, "MASTER FILTER ", 14) && said[said_n - 1].flags == RD_NOW);
+    run(2000); CHECK(decode() == 0u);
+
     /* 6. WHERE: everything again, at once */
     frame(RD_WHERE); run(60);
     CHECK(decode() == 1u && !strncmp(said[said_n - 1].text, "ENV / AMP. ATTACK", 17) && said[said_n - 1].flags == RD_NOW);

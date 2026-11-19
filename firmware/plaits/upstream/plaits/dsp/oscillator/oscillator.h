@@ -34,6 +34,8 @@
 #include "stmlib/dsp/parameter_interpolator.h"
 #include "stmlib/dsp/polyblep.h"
 
+#include "plaits_config.h"
+
 namespace plaits {
 
 enum OscillatorShape {
@@ -153,6 +155,218 @@ class Oscillator {
     frequency_ = interpolated_frequency;
     pw_ = pw;
   }
+
+#if FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE || \
+    FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW
+  /* True only if fl(v + increment) == v, i.e. a ParameterInterpolator that
+   * starts at v > 0 with this increment returns v at every step and writes v
+   * back. increment must be the interpolator's own rounded increment toward
+   * target: fl((target - v) / n) or fl((target - v) * fl(1 / n)).
+   *
+   * Division-free sufficient test. Let v lie in [2^e, 2^(e+1)), so its float
+   * spacing is u = 2^(e-23). |increment| <= |target - v| / n * (1 + 2^-22)
+   * (two roundings). If |target - v| < n * v * 1.4e-8, then, since
+   * 1.4e-8 * (1 + 2^-22)^3 < 2^-26 = 1.4901e-8 (the product n * v * 1.4e-8
+   * is itself rounded twice), |increment| < v * 2^-26 < 2^(e+1) * 2^-26 =
+   * u / 4. Adding less than u / 4 to v rounds back to v in round-to-nearest
+   * (the nearest other float is u away above, and at least u / 2 below).
+   * Otherwise the sum is formed and compared, kept opaque so the comparison
+   * is made on the rounded float, as the interpolator makes it. */
+  static inline bool InterpolationIsStationary(
+      float v, float target, float n, float increment) {
+    if (v == target) return true;
+    if (__builtin_fabsf(target - v) < n * v * 1.4e-8f) return true;
+    float moved = v + increment;
+    __asm__ volatile("" : "+r"(moved));
+    return moved == v;
+  }
+#endif
+
+#if FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW
+  /* Exact shortcut for a SAW render at a stationary frequency and pulse
+   * width: the same per-sample operations as Render<OSCILLATOR_SHAPE_SAW>
+   * (or the saw loop of RenderSteadyReciprocal, when that entry point would
+   * have used it) minus the two interpolator additions, which are proven to
+   * add nothing (InterpolationIsStationary; pw_ == pw gives a +0 increment),
+   * and with the phase held in a local. Returns false, changing nothing, if
+   * the frequency or pulse width is still moving; the caller then renders
+   * normally. reciprocal_entry says the caller would have entered through
+   * RenderSteadyReciprocal (the ring-mod hi-hat does for full slices).
+   * Not inlined: one copy in flash serves the three saws. */
+  __attribute__((noinline)) bool TrySteadySaw(
+      float frequency, float pw, float inverse_frequency,
+      float inverse_block_size, bool reciprocal_entry,
+      float* out, size_t size) {
+    if (!size) return false;
+    CONSTRAIN(frequency, kMinFrequency, kMaxFrequency);
+    CONSTRAIN(pw, __builtin_fabsf(frequency) * 2.0f,
+              1.0f - 2.0f * __builtin_fabsf(frequency))
+    if (pw_ != pw) return false;
+    const float n = static_cast<float>(size);
+    const float v = frequency_;
+    if (!(v > 0.0f)) return false;
+    // Mirror of RenderSteadyReciprocal's own fallback test.
+    const bool reciprocal = reciprocal_entry &&
+        !(__builtin_fabsf(v - frequency) > 1.0e-6f * frequency ||
+          frequency * n < 1.0f);
+    const float increment = reciprocal
+        ? (frequency - v) * inverse_block_size
+        : (frequency - v) / n;
+    if (!InterpolationIsStationary(v, frequency, n, increment)) return false;
+
+    float phase = phase_;
+    float next_sample = next_sample_;
+    if (reciprocal) {
+      while (size--) {
+        float this_sample = next_sample;
+        next_sample = 0.0f;
+        phase += v;
+        if (phase >= 1.0f) {
+          phase -= 1.0f;
+          const float t = phase * inverse_frequency;
+          this_sample -= stmlib::ThisBlepSample(t);
+          next_sample -= stmlib::NextBlepSample(t);
+        }
+        next_sample += phase;
+        *out++ = 2.0f * this_sample - 1.0f;
+      }
+    } else {
+      while (size--) {
+        float this_sample = next_sample;
+        next_sample = 0.0f;
+        phase += v;
+        if (phase >= 1.0f) {
+          phase -= 1.0f;
+          float t = phase / v;
+          this_sample -= stmlib::ThisBlepSample(t);
+          next_sample -= stmlib::NextBlepSample(t);
+        }
+        next_sample += phase;
+        *out++ = 2.0f * this_sample - 1.0f;
+      }
+    }
+    phase_ = phase;
+    next_sample_ = next_sample;
+    return true;
+  }
+#endif
+
+#if FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM
+  /* Exact closed form for n sequential float additions p <- fl(p + v) that
+   * stay inside one binade. Returns true with *phase = the value those n
+   * additions produce, and that value below limit; returns false (caller
+   * falls back to the additions themselves) whenever the closed form does
+   * not apply or the result would not be below limit.
+   *
+   * Let B = 2^e be the largest power of two <= p0, u = B * 2^-23 the float
+   * spacing in [B, 2B), and suppose 0 < v < B. Every float in [B, 2B) is a
+   * multiple of u. Write v = m * u + r with m an integer and |r| <= u / 2.
+   * If |r| < u / 2 and p_k, p_k + m * u both lie in [B, 2B), the exact sum
+   * p_k + v is within u / 2 of the float p_k + m * u, strictly, so
+   * round-to-nearest gives fl(p_k + v) = p_k + m * u: each addition adds
+   * exactly w = m * u, and p_n = p0 + n * w, an integer multiple of u, as
+   * long as p_n < 2B (the sums increase, so that covers every step).
+   *
+   * Float evaluation, each step exact:
+   *   w = fl(B + v) - B. B + v lies in [B, 2B), so fl rounds v to a
+   *       multiple of u, and the subtraction of B is exact (Sterbenz).
+   *   A tie (|r| = u / 2, where the rounding direction of a real step
+   *       depends on the parity of p_k) shows as |w - v| = u / 2 exactly
+   *       (w - v is a multiple of ulp(v) below 2^24 ulp(v): representable);
+   *       ties are refused.
+   *   n * w: if the true product is below B it is an integer below 2^23
+   *       times u, representable, so fl is exact; if not, fl(n * w) >= B
+   *       and the final test fails. p0 + n * w: a multiple of u; below 2B
+   *       it is representable, so fl is exact; otherwise fl >= 2B and the
+   *       final test fails.
+   * The two intermediates are kept opaque so a reassociating compiler
+   * cannot cancel (B + v) - B. */
+  static inline bool AccumulateInBinade(
+      float* phase, float v, float n, float limit) {
+    const float p0 = *phase;
+    uint32_t bits;
+    __builtin_memcpy(&bits, &p0, sizeof(bits));
+    bits &= 0x7f800000u;
+    float base;
+    __builtin_memcpy(&base, &bits, sizeof(base));
+    // Normal, positive binade with room for u / 2, and 0 < v < B.
+    if (!(base >= 1.0e-30f) || !(p0 >= base) || !(v > 0.0f) || !(v < base)) {
+      return false;
+    }
+    float sum = base + v;
+    __asm__ volatile("" : "+r"(sum));
+    float w = sum - base;
+    __asm__ volatile("" : "+r"(w));
+    const float half_spacing = base * 5.9604644775390625e-08f;  // B * 2^-24
+    if (__builtin_fabsf(w - v) == half_spacing) return false;
+    const float top = base + base;
+    const float end = p0 + n * w;
+    if (!(end < top) || !(end < limit)) return false;
+    *phase = end;
+    return true;
+  }
+#endif
+
+#if FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE
+  /* Exact shortcut for a SQUARE render whose output is one constant level.
+   *
+   * Render<OSCILLATOR_SHAPE_SQUARE>(frequency, pw, out, size) computes, per
+   * sample, v += dv; pw' += dpw; phase += v; then a BLEP correction if the
+   * phase crossed pw' or 1, and out = 2 * this_sample - 1. If
+   *   (a) pw_ == pw            (so dpw = +0 and pw' stays pw),
+   *   (b) fl(v + dv) == v      (so every sample adds the same v > 0),
+   *   (c) high_ == (phase_ >= pw) and next_sample_ == (high_ ? 1 : 0)
+   *                            (no BLEP residue is pending), and
+   *   (d) after the size sequential additions the phase is still below the
+   *       next crossing (pw when low, 1 when high),
+   * then, because the additions of v > 0 are monotone, no sample crosses, no
+   * correction term is ever added, every output is exactly 2 * 1 - 1 = +1
+   * (high) or 2 * 0 - 1 = -1 (low), and the only state that changes is
+   * phase_, by those same size additions. This function tests (a)-(d) with
+   * the same float operations the render would perform; on success it commits
+   * the phase and returns the level, otherwise it changes nothing and the
+   * caller renders normally. frequency * size < 1 is required so that both
+   * entry points used by the ring-mod hi-hat (Render and
+   * RenderSteadyReciprocal) would have run the plain Render loop mirrored
+   * here. Not inlined: one copy in flash serves the three squares. */
+  __attribute__((noinline)) bool TryConstantSquare(
+      float frequency, float pw, size_t size, float* level) {
+    if (!size) return false;
+    CONSTRAIN(frequency, kMinFrequency, kMaxFrequency);
+    CONSTRAIN(pw, __builtin_fabsf(frequency) * 2.0f,
+              1.0f - 2.0f * __builtin_fabsf(frequency))
+    if (pw_ != pw) return false;
+    const float n = static_cast<float>(size);
+    if (!(frequency * n < 1.0f)) return false;
+    const float v = frequency_;
+    if (!(v > 0.0f)) return false;
+    if (!InterpolationIsStationary(v, frequency, n, (frequency - v) / n)) {
+      return false;
+    }
+    const bool high = high_;
+    float phase = phase_;
+    if (high != (phase >= pw)) return false;
+    if (next_sample_ != (high ? 1.0f : 0.0f)) return false;
+    const float limit = high ? 1.0f : pw;
+#if FM1_PLAITS_HIHAT_RINGMOD_PHASE_CLOSED_FORM
+    if (!AccumulateInBinade(&phase, v, n, limit))
+#endif
+    {
+      phase = phase_;
+      for (size_t i = 0; i < size; ++i) {
+        phase += v;
+        // One rounded float addition per sample, as the render performs
+        // them: a compiler allowed to reassociate must not turn this into
+        // phase + size * v, which rounds differently.
+        __asm__ volatile("" : "+r"(phase));
+      }
+    }
+    if (!(phase < limit)) return false;
+    phase_ = phase;
+    *level = high ? 1.0f : -1.0f;
+    return true;
+  }
+#endif
 
   template<OscillatorShape shape, bool has_external_fm, bool through_zero_fm>
   void Render(

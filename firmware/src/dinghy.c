@@ -201,6 +201,7 @@ static struct {
     uint32_t note[BR_PARTS];
     struct { uint16_t length; uint8_t note, velocity, condition; } seq_default[BR_PARTS][BR_DRUM_LANES];
     uint32_t previous_keys, edit_time, edit_key;
+    uint32_t filter_cue_at; uint8_t filter_cue;   /* the deferred MASTER FILTER cue (br_filter_cue_tick) */
 #if BR_PRODUCT_SMK37
     uint8_t held_note[BR_PLAY_KEYS], held_part[BR_PLAY_KEYS]; /* MIDI note + 1, track */
 #else
@@ -1293,9 +1294,11 @@ static uint32_t app_audio(int32_t *out, uint32_t n)
                 br_audio_pipeline_write_slot ^= 1u;
             }
         } else {
+            BR_IDLE_OUT_ZERO_CLEAR();
             br_fx_process(bus, out + 2u * off, size);
         }
 #else
+        BR_IDLE_OUT_ZERO_CLEAR();
         br_fx_process(bus, out + 2u * off, size);
 #endif
 #if (defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)) || defined(BR_SOURCE_QUEUE_TEST)
@@ -1339,6 +1342,7 @@ static uint32_t app_audio(int32_t *out, uint32_t n)
                 br_punch_echo_part = (uint8_t)p;
                 br_punch_dsp.line = br_fx_echo_line(p, &br_punch_dsp.line_len);
             }
+            if (effect) BR_IDLE_OUT_ZERO_CLEAR();   /* the punch effect writes into the buffer */
             br_punch_process(&br_punch_dsp, &br_punch_cfg, effect,
                              out + 2u * off, size, FS * 60u / bpm);
         }
@@ -1347,6 +1351,7 @@ static uint32_t app_audio(int32_t *out, uint32_t n)
 #endif
             br_engine_post_join_finish();   /* no-op if CPU1 already ran it */
         br_audio_commit_block(out + 2u * off, size);
+        BR_IDLE_STAMP(20);
 #if defined(FM1_DEVICE) || defined(BR_DIAGNOSTIC_TEST)
         if (!chunk_failed) br_half_timing_complete_chunk();
 #endif
@@ -1887,6 +1892,7 @@ static void br_app_tick_inner(void)
             br_ui.mode_pending &= ~bit; br_ui.mode_fired &= ~bit;
         }
     }
+    br_filter_cue_tick();
     /* Hold gestures are invisible until you try them, so name the active one while its button is held.
      * The cue appears after a short delay so plain taps do not flash it. */
     {

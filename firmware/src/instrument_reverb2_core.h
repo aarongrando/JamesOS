@@ -49,6 +49,11 @@ static const uint16_t rv2_blen[RV2_LINES] RV2_TABLE(rv2_blen) = {
     RV2_L4 + RV2_LINE_PAD, RV2_L5 + RV2_LINE_PAD, RV2_L6 + RV2_LINE_PAD, RV2_L7 + RV2_LINE_PAD};
 static const uint16_t rv2_ap_len[4] RV2_TABLE(rv2_ap_len) = {RV2_AP0_LEN, RV2_AP1_LEN, RV2_AP2_LEN, RV2_AP3_LEN};
 static const uint16_t rv2_ap_off[4] RV2_TABLE(rv2_ap_off) = {0, RV2_AP0_LEN, RV2_AP0_LEN + RV2_AP1_LEN, RV2_AP0_LEN + RV2_AP1_LEN + RV2_AP2_LEN};
+#if RV2_LINE_STRUCT && RV2_LINE_PTR
+#define RV2_BUF(st, mem, i) ((st)->ln[i].buf)
+#define RV2_PUT(st, mem, i, p, w) ((st)->ln[i].buf[p] = (w))
+#define RV2_BLEN(st, i) ((st)->ln[i].blen)
+#else
 #if RV2_LINE_STRUCT
 #define RV2_OFF(st, i) ((st)->ln[i].off)
 #define RV2_BLEN(st, i) ((st)->ln[i].blen)
@@ -56,6 +61,25 @@ static const uint16_t rv2_ap_off[4] RV2_TABLE(rv2_ap_off) = {0, RV2_AP0_LEN, RV2
 #define RV2_OFF(st, i) (rv2_off[i])
 #define RV2_BLEN(st, i) (rv2_blen[i])
 #endif
+#define RV2_BUF(st, mem, i) ((mem) + RV2_OFF(st, i))
+#define RV2_PUT(st, mem, i, p, w) ((mem)[RV2_OFF(st, i) + (p)] = (w))
+#endif
+
+/* The loop shelf of one line (see the block comment in rv2_core_run), r[i] in, o[i] out. A macro so the read loop can run it
+ * (RV2_FUSE_SHELF) or a loop of its own. */
+#define RV2_SHELF(i) \
+    if (!end) { \
+        int32_t acc = ((RV2_LN(s, i, b) * r[i]) >> 1) - ((RV2_LN(s, i, a) * RV2_LN(s, i, s)) >> 1) + RV2_LN(s, i, e); \
+        int32_t q = (acc + 8192) >> 14; \
+        RV2_LN(s, i, e) = acc - (q << 14); \
+        RV2_LN(s, i, s) += q; \
+        o[i] = RV2_LN(s, i, s) + ((RV2_LN(s, i, dd) * r[i] + 16384) >> 15); \
+    } else { \
+        int32_t t = (RV2_LN(s, i, s) << 14) + ((RV2_LN(s, i, b) * r[i]) >> 1) - ((RV2_LN(s, i, a) * RV2_LN(s, i, s)) >> 1); \
+        RV2_LN(s, i, s) = (t + ((t >> 31) & 16383)) >> 14; \
+        RV2_LN(s, i, e) = 0; \
+        o[i] = RV2_LN(s, i, s) + RV2_TZ15(RV2_LN(s, i, dd) * r[i]); \
+    }
 
 /* Run `frames` input frames (even, <= 2*RV2_SUB) at 44.1 kHz. Sets s->loud
  * bit 0 when any line write exceeds 1 LSB, bit 1 when the network had input. */
@@ -65,6 +89,9 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
     int16_t *const mem = s->p16;
     const uint32_t end = s->end;
     uint32_t loud = s->loud;
+#if RV2_LOUD_MAX
+    uint32_t lmax = 0u;   /* largest (w + 1) written; loud bit 0 = any line write beyond 1 LSB, tested once after the loop */
+#endif
     unsigned f;
     for (f = 0; f + 1u < frames; f += 2u) {
         int32_t r[8], v[8], o[8], x, i, ol, orr;
@@ -171,7 +198,7 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
          * D = N + 0.5 + frac, eta = (0.5 - frac)/2 (Q15, |eta| <= 1/4),
          * y = eta (x[n-N] - y[-1]) + x[n-N-1]; unit magnitude at all eta. */
         for (i = 0; i < 8; ++i) {
-            const int16_t *buf = mem + RV2_OFF(s, i);
+            const int16_t *buf = RV2_BUF(s, mem, i);
             int32_t blen = RV2_BLEN(s, i), w = RV2_LN(s, i, wpos), dq = RV2_LN(s, i, d);
 #if RV2_INT_READS
             if (i & 1) {
@@ -191,6 +218,9 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
                 r[i] = y;
             }
             RV2_LN(s, i, d) = dq + RV2_LN(s, i, inc);
+#if RV2_FUSE_SHELF
+            RV2_SHELF(i)
+#endif
         }
         /* ---- outputs: orthogonal sign sets over all 8 lines; bloom: lines 4..7 */
         if (!s->bloom) {
@@ -204,6 +234,7 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
         /* ---- loop shelf H = Gh + (Gl-Gh)(1-p)/(1-p z^-1), 1/sqrt8 folded in.
          * State s Q2. |b r|,|a s|,|dd r| < 2^30.5; halved before subtracting.
          * Normal: first-order error feedback. End: truncate new state to zero. */
+#if !RV2_FUSE_SHELF
         if (!end) {
             for (i = 0; i < 8; ++i) {
                 int32_t acc = ((RV2_LN(s, i, b) * r[i]) >> 1) - ((RV2_LN(s, i, a) * RV2_LN(s, i, s)) >> 1) + RV2_LN(s, i, e);
@@ -220,6 +251,7 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
                 o[i] = RV2_LN(s, i, s) + RV2_TZ15(RV2_LN(s, i, dd) * r[i]);
             }
         }
+#endif
         /* ---- 8-point fast Walsh-Hadamard transform (unnormalised) */
         {
             int32_t a0 = o[0] + o[1], a1 = o[0] - o[1], a2 = o[2] + o[3], a3 = o[2] - o[3];
@@ -248,12 +280,16 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
             else w = (v[i] + ((v[i] >> 31) & 3)) >> 2;
             if (w > RV2_KNEE) { int32_t ex = w - RV2_KNEE; w = ex >= 16384 ? 32767 : RV2_KNEE + ex - ((ex * ex) >> 15); }
             else if (w < -RV2_KNEE) { int32_t ex = -RV2_KNEE - w; w = ex >= 16384 ? -32767 : -RV2_KNEE - ex + ((ex * ex) >> 15); }
+#if RV2_LOUD_MAX
+            { uint32_t uw = (uint32_t)(w + 1); lmax = uw > lmax ? uw : lmax; }
+#else
             loud |= (uint32_t)(w + 1) > 2u;
+#endif
 #ifdef RV2_HOST_DIAG
             { int32_t aw = (v[i] < 0 ? -v[i] : v[i]) >> 2; if (aw > s->peak_line) s->peak_line = aw; }
 #endif
             p = RV2_LN(s, i, wpos);
-            mem[RV2_OFF(s, i) + p] = (int16_t)w;
+            RV2_PUT(s, mem, i, p, (int16_t)w);
             if (++p == RV2_BLEN(s, i)) p = 0;
             RV2_LN(s, i, wpos) = (uint16_t)p;
         }
@@ -286,6 +322,9 @@ static RV2_RAM void rv2_core_run(rv2_state_t *s, const int32_t *in, int32_t *out
             }
         }
     }
+#if RV2_LOUD_MAX
+    loud |= lmax > 2u;
+#endif
     s->loud = loud;
 }
 #endif

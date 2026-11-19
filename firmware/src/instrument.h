@@ -31,6 +31,7 @@ void br_audio_fixed8_foreground_invalidate(void);
 #ifndef BR_AUDIO_FUSION_ONLY_BUILD
 #define BR_AUDIO_FUSION_ONLY_BUILD 1
 #endif
+#include "idle_stage_ticks.h"
 #ifndef BR_AUDIO_FUSION_FOUR_WAY_KIT
 #define BR_AUDIO_FUSION_FOUR_WAY_KIT 1
 #endif

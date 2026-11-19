@@ -138,7 +138,7 @@ static inline void br_poly_source_render(br_poly_source_t *s, uint8_t voice,
         int32_t pitch, uint16_t timbre, uint16_t morph, uint16_t harmonics,
         uint16_t aux, int16_t *out, uint32_t n)
 {
-    if (voice >= s->allocator.limit || !s->storage.voice[voice] || plaits_quiet(s->storage.voice[voice])) {
+    if (voice >= s->allocator.limit || !s->storage.voice[voice] || plaits_quiet_long(s->storage.voice[voice])) {
         memset(out, 0, n * sizeof(*out));
         return;
     }

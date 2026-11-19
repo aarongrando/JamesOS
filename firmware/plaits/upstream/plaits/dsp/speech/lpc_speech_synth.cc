@@ -53,79 +53,62 @@ void LPCSpeechSynth::Init() {
   fill(&s_[0], &s_[kLPCOrder + 1], 0);
 }
 
-void LPCSpeechSynth::Render(
-    float prosody_amount,
-    float pitch_shift,
-    float* excitation,
-    float* output,
-    size_t size) {
+float LPCSpeechSynth::ExcitationFrequency(float prosody_amount, float pitch_shift) const {
   const float base_f0 = kLPCSpeechSynthDefaultF0 / 8000.0f;
   float d = frequency_ - base_f0;
   float f = (base_f0 + d * prosody_amount) * pitch_shift;
   CONSTRAIN(f, 0.0f, 0.5f);
-  
-  float next_sample = next_sample_;
-  while (size--) {
-    phase_ += f;
-    
-    float this_sample = next_sample;
-    next_sample = 0.0f;
-    
-    if (phase_ >= 1.0f) {
-      phase_ -= 1.0f;
-      float reset_time = phase_ / f;
-      int reset_sample = static_cast<int>(32.0f * reset_time);
-      
-      float discontinuity = 0.0f;
-      if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE) {
-        excitation_pulse_sample_index_ -= reset_sample;
-        int8_t s = lut_lpc_excitation_pulse[excitation_pulse_sample_index_];
-        discontinuity = static_cast<float>(s) / 128.0f * pulse_energy_;
-      }
-      
-      this_sample += -discontinuity * ThisBlepSample(reset_time);
-      next_sample += -discontinuity * NextBlepSample(reset_time);
-      
-      excitation_pulse_sample_index_ = reset_sample;
-    }
-    
-    float e[11];
-    e[10] = Random::GetSample() > 0 ? noise_energy_ : -noise_energy_;
-    if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE) {
-      int8_t s = lut_lpc_excitation_pulse[excitation_pulse_sample_index_];
-      next_sample += static_cast<float>(s) / 128.0f * pulse_energy_;
-      excitation_pulse_sample_index_ += 32;
-    }
-    e[10] += this_sample;
-    e[10] *= 1.5f;
-  
-    e[9] = e[10] - k_[9] * s_[9];
-    e[8] = e[9] - k_[8] * s_[8];
-    e[7] = e[8] - k_[7] * s_[7];
-    e[6] = e[7] - k_[6] * s_[6];
-    e[5] = e[6] - k_[5] * s_[5];
-    e[4] = e[5] - k_[4] * s_[4];
-    e[3] = e[4] - k_[3] * s_[3];
-    e[2] = e[3] - k_[2] * s_[2];
-    e[1] = e[2] - k_[1] * s_[1];
-    e[0] = e[1] - k_[0] * s_[0];
-  
-    CONSTRAIN(e[0], -2.0f, 2.0f);
+  return f;
+}
 
-    s_[9] = s_[8] + k_[8] * e[8];
-    s_[8] = s_[7] + k_[7] * e[7];
-    s_[7] = s_[6] + k_[6] * e[6];
-    s_[6] = s_[5] + k_[5] * e[5];
-    s_[5] = s_[4] + k_[4] * e[4];
-    s_[4] = s_[3] + k_[3] * e[3];
-    s_[3] = s_[2] + k_[2] * e[2];
-    s_[2] = s_[1] + k_[1] * e[1];
-    s_[1] = s_[0] + k_[0] * e[0];
-    s_[0] = e[0];
-    
-    *excitation++ = e[10];
-    *output++ = e[0];
+void LPCSpeechSynth::RenderSample(float f, float* excitation, float* output) {
+  phase_ += f;
+
+  float this_sample = next_sample_;
+  float next_sample = 0.0f;
+
+  if (phase_ >= 1.0f) {
+    phase_ -= 1.0f;
+    float reset_time = phase_ / f;
+    int reset_sample = static_cast<int>(32.0f * reset_time);
+
+    float discontinuity = 0.0f;
+    if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE) {
+      excitation_pulse_sample_index_ -= reset_sample;
+      int8_t s = lut_lpc_excitation_pulse[excitation_pulse_sample_index_];
+      discontinuity = static_cast<float>(s) / 128.0f * pulse_energy_;
+    }
+
+    this_sample += -discontinuity * ThisBlepSample(reset_time);
+    next_sample += -discontinuity * NextBlepSample(reset_time);
+
+    excitation_pulse_sample_index_ = reset_sample;
   }
+
+  float input = Random::GetSample() > 0 ? noise_energy_ : -noise_energy_;
+  if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE) {
+    int8_t s = lut_lpc_excitation_pulse[excitation_pulse_sample_index_];
+    next_sample += static_cast<float>(s) / 128.0f * pulse_energy_;
+    excitation_pulse_sample_index_ += 32;
+  }
+  input += this_sample;
+  input *= 1.5f;
+
+  // Each descending stage consumes its old delay before the next stage
+  // overwrites it. Update the backward wave as soon as its forward wave
+  // is available, so the ten intermediate errors need not stay live.
+  float error = input - k_[9] * s_[9];
+  for (int i = 8; i > 0; --i) {
+    error -= k_[i] * s_[i];
+    s_[i + 1] = s_[i] + k_[i] * error;
+  }
+  error -= k_[0] * s_[0];
+  CONSTRAIN(error, -2.0f, 2.0f);
+  s_[1] = s_[0] + k_[0] * error;
+  s_[0] = error;
+
+  *excitation = input;
+  *output = error;
   next_sample_ = next_sample;
 }
 

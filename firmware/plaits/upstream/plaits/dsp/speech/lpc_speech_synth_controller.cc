@@ -300,6 +300,8 @@ void LPCSpeechSynthController::Render(
     remaining_frame_samples_ -= min(size, remaining_frame_samples_);
   }
   
+  // PlayFrame is the only operation that changes the LPC pitch within a block.
+  const float f = synth_.ExcitationFrequency(prosody_amount, pitch_shift);
   ParameterInterpolator gain_modulation(&gain_, gain, size);
   
   while (size--) {
@@ -313,11 +315,7 @@ void LPCSpeechSynthController::Render(
       float reset_time = clock_phase_ / rate;
       float new_sample[2];
       
-      synth_.Render(
-          prosody_amount,
-          pitch_shift,
-          &new_sample[0],
-          &new_sample[1], 1);
+      synth_.RenderSample(f, &new_sample[0], &new_sample[1]);
       
       float discontinuity[2] = {
         new_sample[0] - sample_[0],

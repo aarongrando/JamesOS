@@ -63,8 +63,9 @@ struct DataType<FORMAT_12_BIT> {
   }
   
   static inline T Compress(float value) {
+    const int32_t sample = static_cast<int32_t>(value * 4096.0f);
     return static_cast<uint16_t>(
-        stmlib::Clip16(static_cast<int32_t>(value * 4096.0f)));
+        std::min<int32_t>(32767, std::max<int32_t>(-32768, sample)));
   }
 };
 

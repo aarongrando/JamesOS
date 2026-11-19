@@ -58,8 +58,6 @@ class WaveTerrainEngine : public Engine {
       bool* already_enveloped);
   
  private:
-  float Terrain(float x, float y, int terrain_index);
-  
   FastSineOscillator path_;
   float offset_;
   float terrain_;

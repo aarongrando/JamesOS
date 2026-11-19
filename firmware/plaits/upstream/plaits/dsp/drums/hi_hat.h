@@ -59,6 +59,21 @@
 
 namespace plaits {
 
+#if defined(FM1_PLAITS_HIHAT_STATS) && FM1_PLAITS_HIHAT_STATS
+// Host test instrumentation only (tests/hihat_exact_harness.cc).
+enum {
+  HIHAT_STAT_RINGMOD_CHUNKS,
+  HIHAT_STAT_RINGMOD_ALL_CONSTANT,
+  HIHAT_STAT_RINGMOD_CONSTANT_PAIRS,
+  HIHAT_STAT_RINGMOD_STEADY_SAWS,
+  HIHAT_STAT_COUNT
+};
+static uint32_t g_hihat_stats[HIHAT_STAT_COUNT];
+#define FM1_HIHAT_STAT(index, amount) (g_hihat_stats[index] += (amount))
+#else
+#define FM1_HIHAT_STAT(index, amount) ((void)0)
+#endif
+
 struct HiHatControlCoefficients {
   float envelope_decay;
   float cut_decay;
@@ -159,7 +174,10 @@ class RingModNoise {
     const float f3a = 730.0f / kSampleRate * ratio;
     const float f3b = 10500.0f / kSampleRate * ratio;
     const float f[3][2] = { { f1a, f1b }, { f2a, f2b }, { f3a, f3b } };
+#if !(FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE && \
+      FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL)
     std::fill(&out[0], &out[size], 0.0f);
+#endif
 
 #if FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL
     float inverse_f[3][2];
@@ -174,10 +192,59 @@ class RingModNoise {
       inverse_f[2][0] = (kSampleRate / 730.0f) * inverse_ratio;
       inverse_f[2][1] = (kSampleRate / 10500.0f) * inverse_ratio;
     }
+#if FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE
+    // out = ((0 + q0 * w0) + q1 * w1) + q2 * w2, with q the squares and w the
+    // saws. A square that holds one level L for the chunk gives q * w = L * w
+    // exactly, so only its saw is rendered (by the unchanged saw code).
+    float level[3];
+    bool constant[3];
+    for (int i = 0; i < 3; ++i) {
+      constant[i] = oscillator_[2 * i].TryConstantSquare(
+          f[i][0], 0.5f, size, &level[i]);
+    }
+    FM1_HIHAT_STAT(HIHAT_STAT_RINGMOD_CHUNKS, 1u);
+    FM1_HIHAT_STAT(HIHAT_STAT_RINGMOD_CONSTANT_PAIRS,
+                   static_cast<uint32_t>(constant[0]) + constant[1] + constant[2]);
+    if (constant[0] && constant[1] && constant[2]) {
+      FM1_HIHAT_STAT(HIHAT_STAT_RINGMOD_ALL_CONSTANT, 1u);
+      RenderSaw(&oscillator_[1], f[0][1], inverse_f[0][1], inverse_block_size,
+                use_fast_reciprocal, out, size);
+      RenderSaw(&oscillator_[3], f[1][1], inverse_f[1][1], inverse_block_size,
+                use_fast_reciprocal, temp_1, size);
+      RenderSaw(&oscillator_[5], f[2][1], inverse_f[2][1], inverse_block_size,
+                use_fast_reciprocal, temp_2, size);
+      const float level_0 = level[0];
+      const float level_1 = level[1];
+      const float level_2 = level[2];
+      // Keep the rounded first sum opaque under the relaxed DSP flags.
+      for (size_t j = 0; j < size; ++j) {
+        float pair = (0.0f + level_0 * out[j]) + level_1 * temp_1[j];
+        __asm__ volatile("" : "+r"(pair));
+        out[j] = pair + level_2 * temp_2[j];
+      }
+      return;
+    }
+    std::fill(&out[0], &out[size], 0.0f);
+    for (int i = 0; i < 3; ++i) {
+      if (constant[i]) {
+        RenderSaw(&oscillator_[2 * i + 1], f[i][1], inverse_f[i][1],
+                  inverse_block_size, use_fast_reciprocal, temp_2, size);
+        const float level_i = level[i];
+        for (size_t j = 0; j < size; ++j) {
+          out[j] += level_i * temp_2[j];
+        }
+      } else {
+        RenderPair(&oscillator_[2 * i], f[i], inverse_f[i],
+                   inverse_block_size, use_fast_reciprocal, temp_1, temp_2,
+                   out, size);
+      }
+    }
+#else
     for (int i = 0; i < 3; ++i) {
       RenderPair(&oscillator_[2 * i], f[i], inverse_f[i], inverse_block_size,
                  use_fast_reciprocal, temp_1, temp_2, out, size);
     }
+#endif
 #else
     for (int i = 0; i < 3; ++i) {
       RenderPair(&oscillator_[2 * i], f[i], temp_1, temp_2, out, size);
@@ -186,6 +253,33 @@ class RingModNoise {
   }
 
  private:
+#if FM1_PLAITS_HIHAT_RINGMOD_CONSTANT_SQUARE && \
+    FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL
+  // The saw half of RenderPair.
+  void RenderSaw(
+      Oscillator* osc,
+      float f,
+      float inverse_f,
+      float inverse_block_size,
+      bool use_fast_reciprocal,
+      float* out,
+      size_t size) {
+#if FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW
+    if (osc->TrySteadySaw(f, 0.5f, inverse_f, inverse_block_size,
+                          use_fast_reciprocal, out, size)) {
+      FM1_HIHAT_STAT(HIHAT_STAT_RINGMOD_STEADY_SAWS, 1u);
+      return;
+    }
+#endif
+    if (use_fast_reciprocal) {
+      osc->RenderSteadyReciprocal<OSCILLATOR_SHAPE_SAW>(
+          f, 0.5f, inverse_f, inverse_block_size, out, size);
+    } else {
+      osc->Render<OSCILLATOR_SHAPE_SAW>(f, 0.5f, out, size);
+    }
+  }
+#endif
+
   void RenderPair(
       Oscillator* osc,
       const float* f,
@@ -198,7 +292,19 @@ class RingModNoise {
       float* temp_2,
       float* out,
       size_t size) {
-#if FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL
+#if FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL && \
+    FM1_PLAITS_HIHAT_RINGMOD_STEADY_SAW
+    // A square with an edge in this slice: rendered as before; its saw
+    // still takes the stationary loop when it qualifies.
+    if (use_fast_reciprocal) {
+      osc[0].RenderSteadyReciprocal<OSCILLATOR_SHAPE_SQUARE>(
+          f[0], 0.5f, inverse_f[0], inverse_block_size, temp_1, size);
+    } else {
+      osc[0].Render<OSCILLATOR_SHAPE_SQUARE>(f[0], 0.5f, temp_1, size);
+    }
+    RenderSaw(&osc[1], f[1], inverse_f[1], inverse_block_size,
+              use_fast_reciprocal, temp_2, size);
+#elif FM1_PLAITS_HIHAT_FAST_BLEP_RECIPROCAL
     if (use_fast_reciprocal) {
       osc[0].RenderSteadyReciprocal<OSCILLATOR_SHAPE_SQUARE>(
           f[0], 0.5f, inverse_f[0], inverse_block_size, temp_1, size);
@@ -286,8 +392,13 @@ class HiHat {
     // Apply BPF on the metallic noise.
     noise_coloration_svf_.set_f_q<stmlib::FREQUENCY_ACCURATE>(
         coefficients.cutoff, resonance ? 3.0f + 3.0f * tone : 1.0f);
+#if FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS
+    noise_coloration_svf_.ProcessLocalCoefficients<
+        stmlib::FILTER_MODE_BAND_PASS>(out, out, size);
+#else
     noise_coloration_svf_.Process<stmlib::FILTER_MODE_BAND_PASS>(
         out, out, size);
+#endif
     
     // This is not at all part of the 808 circuit! But to add more variety, we
     // add a variable amount of clocked noise to the output of the 6 schmitt
@@ -296,6 +407,42 @@ class HiHat {
     float noise_f = f0 * (16.0f + 16.0f * (1.0f - noisiness));
     CONSTRAIN(noise_f, 0.0f, 0.5f);
     
+#if FM1_PLAITS_HIHAT_LOCAL_STATE
+    {
+      float noise_clock = noise_clock_;
+      float noise_sample = noise_sample_;
+      for (size_t i = 0; i < size; ++i) {
+        noise_clock += noise_f;
+        if (noise_clock >= 1.0f) {
+          noise_clock -= 1.0f;
+          noise_sample = stmlib::Random::GetFloat() - 0.5f;
+        }
+        out[i] += noisiness * (noise_sample - out[i]);
+      }
+      noise_clock_ = noise_clock;
+      noise_sample_ = noise_sample;
+    }
+
+    // Apply VCA.
+    stmlib::ParameterInterpolator sustain_gain(
+        &sustain_gain_,
+        accent * decay,
+        size);
+    {
+      float envelope = envelope_;
+      const float envelope_decay = coefficients.envelope_decay;
+      const float cut_decay = coefficients.cut_decay;
+      for (size_t i = 0; i < size; ++i) {
+        VCA vca;
+        envelope *= envelope > 0.5f || !two_stage_envelope
+            ? envelope_decay
+            : cut_decay;
+        out[i] = vca(out[i], sustain ? sustain_gain.Next() : envelope);
+      }
+      envelope_ = envelope;
+    }
+
+#else
     for (size_t i = 0; i < size; ++i) {
       noise_clock_ += noise_f;
       if (noise_clock_ >= 1.0f) {
@@ -317,9 +464,15 @@ class HiHat {
           : coefficients.cut_decay;
       out[i] = vca(out[i], sustain ? sustain_gain.Next() : envelope_);
     }
+#endif
     
     hpf_.set_f_q<stmlib::FREQUENCY_ACCURATE>(coefficients.cutoff, 0.5f);
+#if FM1_PLAITS_HIHAT_LOCAL_SVF_COEFFICIENTS
+    hpf_.ProcessLocalCoefficients<stmlib::FILTER_MODE_HIGH_PASS>(
+        out, out, size);
+#else
     hpf_.Process<stmlib::FILTER_MODE_HIGH_PASS>(out, out, size);
+#endif
   }
 
  private:

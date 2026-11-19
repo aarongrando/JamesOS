@@ -311,7 +311,14 @@ RV2_API void rv2_init(rv2_state_t *s, int16_t *pool16, int32_t *pool32)
     memset(s, 0, sizeof *s);
     s->p16 = pool16; s->p32 = pool32;
 #if RV2_LINE_STRUCT
-    { unsigned i; for (i = 0; i < RV2_LINES; ++i) { s->ln[i].off = rv2_off[i]; s->ln[i].blen = rv2_blen[i]; } }
+    { unsigned i; for (i = 0; i < RV2_LINES; ++i) { 
+#if RV2_LINE_PTR
+        s->ln[i].buf = pool16 + rv2_off[i];
+#else
+        s->ln[i].off = rv2_off[i];
+#endif
+        s->ln[i].blen = rv2_blen[i];
+         } }
 #endif
     s->lfo_ph[1] = 0x40000000u;
     rv2_clear(s);

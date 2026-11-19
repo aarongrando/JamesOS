@@ -40,6 +40,15 @@
 #ifndef RV2_LINE_STRUCT       /* 1: per-line state as an array of structs */
 #define RV2_LINE_STRUCT 0
 #endif
+#ifndef RV2_LOUD_MAX          /* 1: the quiet detector keeps the largest line write instead of testing each (same result) */
+#define RV2_LOUD_MAX 1
+#endif
+#ifndef RV2_LINE_PTR          /* 1 (with RV2_LINE_STRUCT): each line holds a pointer to its ring, not an offset (same result) */
+#define RV2_LINE_PTR 1
+#endif
+#ifndef RV2_FUSE_SHELF        /* 1: the loop shelf runs inside the line-read loop (same result) */
+#define RV2_FUSE_SHELF 1
+#endif
 #ifndef RV2_INT_READS         /* 1: lines 1,3,5,7 read at integer delay, unmodulated */
 #define RV2_INT_READS 0
 #endif
@@ -122,7 +131,12 @@ typedef struct {
 #if RV2_LINE_STRUCT
 typedef struct {
     int32_t d, inc, s, e, es, yap, a, b, dd;
+#if RV2_LINE_PTR
+    uint16_t wpos, blen;
+    int16_t *buf;                      /* the line's ring in pool16 */
+#else
     uint16_t wpos, off, blen, pad;
+#endif
 } rv2_line_t;
 #define RV2_LN(st, i, f) ((st)->ln[i].f)
 #else

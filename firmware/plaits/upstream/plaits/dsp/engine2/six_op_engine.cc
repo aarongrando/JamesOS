@@ -100,6 +100,18 @@ void SixOpEngine::LoadUserData(const uint8_t* user_data) {
   }
 }
 
+// Twelve frames is the normal block size for all three FM banks. Copy two
+// floats at a time without introducing alignment or aliasing requirements.
+static __attribute__((always_inline)) inline void PrepareFour(
+    float* samples, const float* accumulated) {
+  __builtin_memcpy(samples, accumulated, 2 * sizeof(float));
+  __builtin_memcpy(samples + 2, accumulated + 2, 2 * sizeof(float));
+  samples[12] = 0.0f;
+  samples[13] = 0.0f;
+  samples[14] = 0.0f;
+  samples[15] = 0.0f;
+}
+
 void SixOpEngine::Render(
     const EngineParameters& parameters,
     float* out,
@@ -131,55 +143,55 @@ void SixOpEngine::Render(
     }
   } else {
     if (parameters.trigger & TRIGGER_RISING_EDGE) {
-      active_voice_ = (active_voice_ + 1) % kNumSixOpVoices;
+      active_voice_ = 1 - active_voice_;
       voice_[active_voice_].LoadPatch(&patches_[patch_index]);
       voice_[active_voice_].mutable_lfo()->Reset();
     }
-    Voice<6>::Parameters* p = voice_[active_voice_].mutable_parameters();
+    static_assert(kNumSixOpVoices == 2, "staggered pair");
+    FMVoice& active = voice_[active_voice_];
+    FMVoice& other = voice_[1 - active_voice_];
+    Voice<6>::Parameters* p = active.mutable_parameters();
     p->note = parameters.note;
     p->velocity = parameters.accent;
     p->envelope_control = parameters.morph;
-    voice_[active_voice_].mutable_lfo()->Step(float(size));
-    
-    for (int i = 0; i < kNumSixOpVoices; ++i) {
-      Voice<6>::Parameters* p = voice_[i].mutable_parameters();
-      p->brightness = parameters.timbre;
-      p->sustain = false;
-      p->gate = (parameters.trigger & TRIGGER_HIGH) && (i == active_voice_);
-      if (voice_[i].patch() != voice_[active_voice_].patch()) {
-        voice_[i].mutable_lfo()->Step(float(size));
-        voice_[i].set_modulations(voice_[i].lfo());
-      } else {
-        voice_[i].set_modulations(voice_[active_voice_].lfo());
-      }
+    p->brightness = parameters.timbre;
+    p->sustain = false;
+    p->gate = parameters.trigger & TRIGGER_HIGH;
+    active.mutable_lfo()->Step(float(size));
+    active.set_modulations(active.lfo());
+
+    Voice<6>::Parameters* q = other.mutable_parameters();
+    q->brightness = parameters.timbre;
+    q->sustain = false;
+    q->gate = false;
+    if (other.patch() != active.patch()) {
+      other.mutable_lfo()->Step(float(size));
+      other.set_modulations(other.lfo());
+    } else {
+      q->pitch_mod = p->pitch_mod;
+      q->amp_mod = p->amp_mod;
     }
   }
 
-  // Naive block rendering.
-  // fill(temp_buffer_[0], temp_buffer_[size], 0.0f);
-  // for (int i = 0; i < kNumSixOpVoices; ++i) {
-  //   voice_[i].Render(temp_buffer_, size);
-  // }
-
-  // Staggered rendering.
-  copy(
-      &acc_buffer_[0],
-      &acc_buffer_[(kNumSixOpVoices - 1) * size],
-      &temp_buffer_[0]);
-  fill(
-      &temp_buffer_[(kNumSixOpVoices - 1) * size],
-      &temp_buffer_[kNumSixOpVoices * size],
-      0.0f);
-  rendered_voice_ = (rendered_voice_ + 1) % kNumSixOpVoices;
-  voice_[rendered_voice_].Render(temp_buffer_, size * kNumSixOpVoices);
-
-  for (size_t i = 0; i < size; ++i) {
-    aux[i] = out[i] = SoftClip(temp_buffer_[i] * 0.25f);
+  float* const temp = temp_buffer_;
+  float* const tail = temp + size;
+  float* const acc = acc_buffer_;
+  if (size == 12) {
+    PrepareFour(temp, acc);
+    PrepareFour(temp + 4, acc + 4);
+    PrepareFour(temp + 8, acc + 8);
+  } else {
+    for (size_t i = 0; i < size; ++i) {
+      temp[i] = acc[i];
+      tail[i] = 0.0f;
+    }
   }
-  copy(
-      &temp_buffer_[size],
-      &temp_buffer_[kNumSixOpVoices * size],
-      &acc_buffer_[0]);
+  rendered_voice_ = 1 - rendered_voice_;
+  voice_[rendered_voice_].Render(temp, 2 * size);
+  for (size_t i = 0; i < size; ++i) {
+    aux[i] = out[i] = SoftClip(temp[i] * 0.25f);
+    acc[i] = tail[i];
+  }
 }
 
 }  // namespace plaits

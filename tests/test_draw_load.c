@@ -46,6 +46,7 @@ static void btn(uint32_t b) { fm1_in.buttons |= 1u << b; host_pressed |= 1u << b
 static uint32_t settle_and_compare(const char *what)
 {
     uint32_t n = 0;
+    fm1_ms += BR_CHART_MS;                      /* the filter chart follows a moving knob at most every BR_CHART_MS: let that pass */
     while ((br_draw_more || br_ui.redraw) && n < 400u) { pass(); ++n; }
     br_ui.redraw = 1u;                          /* one more frame begun now: moving pictures at this moment */
     while ((br_draw_more || br_ui.redraw) && n < 800u) { pass(); ++n; }

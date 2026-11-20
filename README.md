@@ -38,16 +38,16 @@ The screenshots above are illustrative; compare release graphics with the exact 
 
 ## Status
 
-This tree is JamesOS 1.0b, build 3122 (identities `FM-1_9673122` and `SMK-37 Pro_9653122`). The host test suite is the main regression check; see [Build and test](#build-and-test). Release notes are in [docs/RELEASE-1.0b.md](docs/RELEASE-1.0b.md) and the changelog is in [docs/CHANGELOG.md](docs/CHANGELOG.md).
+This tree is JamesOS 1.0b, build 3123 (identities `FM-1_9673123` and `SMK-37 Pro_9653123`). The host test suite is the main regression check; see [Build and test](#build-and-test). Release notes are in [docs/RELEASE-1.0b.md](docs/RELEASE-1.0b.md) and the changelog is in [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
-Memory budgets of build 3122:
+Memory budgets of build 3123:
 
 | Budget | FM-1 | SMK-37 Pro |
 | --- | --- | --- |
-| Application image | 513,104 of 581,564 B | 530,916 of 619,520 B |
+| Application image | 513,220 of 581,564 B | 531,012 of 619,520 B |
 | `.data` + `.bss` | 85,568 of 98,304 B | 86,624 of 98,304 B |
 | Designated pool | 342,984 of 344,064 B | 343,368 of 344,064 B |
-| RAM code | 31,436 of 32,512 B | 32,188 of 32,512 B |
+| RAM code | 31,440 of 32,512 B | 32,188 of 32,512 B |
 
 Reading the DX7 banks from flash recovered about 12 KB of data memory on both products.
 
@@ -55,8 +55,8 @@ Reading the DX7 banks from flash recovered about 12 KB of data memory on both pr
 
 | Product | Device | Build selection | Status |
 | --- | --- | --- | --- |
-| JamesOS | M-VAVE FM-1 | `tools/build.py --target fm1` | Build 3122. |
-| JamesOS-K | M-VAVE SMK-37 Pro | `tools/build.py --target smk37` | Build 3122. Its button layout is described in [docs/SMK37-PORT.md](docs/SMK37-PORT.md). |
+| JamesOS | M-VAVE FM-1 | `tools/build.py --target fm1` | Build 3123. |
+| JamesOS-K | M-VAVE SMK-37 Pro | `tools/build.py --target smk37` | Build 3123. Its button layout is described in [docs/SMK37-PORT.md](docs/SMK37-PORT.md). |
 
 ## Projects and compatibility
 

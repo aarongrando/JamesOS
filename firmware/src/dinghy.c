@@ -366,6 +366,12 @@ static void br_ui_clock_service(void);
 #define BR_UI_CLOCK_SERVICE() ((void)0)
 #endif
 #include "instrument_ui.c"
+void fm1_screen_restore(void)
+{
+    lcd_fill(0, 0, 240, 240, C_BLACK);
+    br_draw_layout_old = 0xFFFFFFFFu;
+    br_ui.redraw = 1u;
+}
 #include "sequence_shift.h"
 /* A played note's dispatch, stamped with when it was played: its sound is scheduled from that time,
  * not from when this loop got to it (instrument_ui.c br_note_played). */

@@ -1,6 +1,6 @@
 # JamesOS 1.0b
 
-**Build 3122, 20 November 2026.** This is the source at the `v1.0b-build-3122` tag. Build 3083 of 17 November 2026 was the first 1.0b release, at the `v1.0b` tag, and build 3110 of 19 November 2026 followed it at the `v1.0b-build-3110` tag; [Changes in build 3122](#changes-in-build-3122) and [Changes in build 3110](#changes-in-build-3110) list what is different. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
+**Build 3123, 20 November 2026.** This is the source at the `v1.0b-build-3123` tag. Build 3083 of 17 November 2026 was the first 1.0b release, at the `v1.0b` tag, and build 3110 of 19 November 2026 followed it at the `v1.0b-build-3110` tag; [Changes in build 3123](#changes-in-build-3123) and [Changes in build 3110](#changes-in-build-3110) list what is different. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
 
 JamesOS is an independent firmware project by Aaron Grando (a.k.a. James Os) and Gjelly for the M-VAVE FM-1. It builds a second product, JamesOS-K, for the M-VAVE SMK-37 Pro, from the same source tree. This page lists what changed since 1.0a build 2108 (9 November 2026), what changes for existing users, what is known to be wrong, and what has and has not been checked.
 
@@ -10,24 +10,25 @@ Firmware switching can overwrite another firmware's saved data. Back up saved wo
 
 | Product | Device | Identity | Update loader | App package SHA-256 | Size |
 | --- | --- | --- | --- | --- | --- |
-| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673122` | `ota-FM-1_904` | `16f5c78109afd7d155f2aadc65d093757f32af081d823aaec50e29e34a56be4e` | 610,554 B |
-| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653122` | `ota-SMK-37 Pro_9260001` | `79be2708f2f133c4505d2165cfd6d09766634cbca0c456f071440e1eea1cdd98` | 651,472 B |
-| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673122` | `ota-FM-1_015` | `790cf8a51e64a52e913b9fd1c722244ec1c4c47edecf708dee4ca739b20cc1a3` | 623,125 B |
-| JamesOS-K package for an SMK-37 family keyboard on stock firmware, or on JamesOS-K 3122 or later at 360 MHz | SMK-37 Pro, SMK-37 Elite, Donner Starrykey 37 Play, EROK MKE-P37 | `SMK-37 Pro_9653122` | `ota-` followed by the identity it was started from, for example `ota-MKE-P37_004` | `08593126b1db5e90d37f75edf3f1664517405a4db9a9115fba35ba11b040a683` | 664,085 B |
+| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673123` | `ota-FM-1_904` | `ef490fa7cdaa7d5eaa862343f4753d77a13e9ccea4c5574dfd52fd0d7214e0cf` | 610,554 B |
+| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653123` | `ota-SMK-37 Pro_9260001` | `92fde4f02ca3ddfe7b76d505f2f7d087620f9b1edc79732202331af6fc1e436c` | 651,472 B |
+| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673123` | `ota-FM-1_015` | `c15a7f865078b558e3d2003975c771cbf58803f8e1fdb14288c4babefe675ca4` | 623,125 B |
+| JamesOS-K package for an SMK-37 family keyboard on stock firmware, or on JamesOS-K 3122 or later at 360 MHz | SMK-37 Pro, SMK-37 Elite, Donner Starrykey 37 Play, EROK MKE-P37 | `SMK-37 Pro_9653123` | `ota-` followed by the identity it was started from, for example `ota-MKE-P37_004` | `f5c2e2bac83e9fb913ed727383c7e10db791cf0d68db03bd2ad21f8be6f447a1` | 664,085 B |
 | Source archive | | | | published beside the archive | |
 
 The loader identifiers are the ones each package reports while it updates. The two packages for stock firmware carry the maker's update loader and write the boot area with the 396 MHz clock profile.
 
 Each package is built with `tools/build.py` and the flags in the README. The exact command for the final build is recorded in `BUILD-REPRODUCIBILITY.txt` in its source archive. Both update packages rebuild byte for byte from that source archive with the same toolchain and SDK.
 
-## Changes in build 3122
+## Changes in build 3123
 
-Build 3122 installs over build 3110. Projects, sounds and settings carry over.
+Build 3123 installs over builds 3110, 3120 and 3122. Projects, sounds and settings carry over.
 
 Fixes:
 
 - Polyphony: the voices of a chord were summed and clipped to 16 bits before the polyphonic mix gain measured them, so the gain never acted and loud chords clipped. The sum now stays 32-bit.
 - Polyphony: the mix gain ramps across each block instead of stepping at the block edge, recovers over about 370 ms, and scales a chord to the master limiter's knee so the limiter stays linear.
+- After a refused or failed update, the instrument screen returns two seconds after the notice. Before, the notice stayed until something else repainted the screen.
 
 SMK-37 family:
 
@@ -165,14 +166,14 @@ These come from a host audit of the sequencer and clock code. None is a regressi
 
 ## Memory budgets
 
-Build 3122. Limits come from `tools/build.py` and `firmware/product.h`.
+Build 3123. Limits come from `tools/build.py` and `firmware/product.h`.
 
 | Budget | FM-1 used | FM-1 limit | SMK-37 Pro used | SMK-37 Pro limit |
 | --- | --- | --- | --- | --- |
-| Application image | 513,104 B | 581,564 B | 530,916 B | 619,520 B |
+| Application image | 513,220 B | 581,564 B | 531,012 B | 619,520 B |
 | `.data` + `.bss` | 85,568 B | 98,304 B | 86,624 B | 98,304 B |
 | Designated pool | 342,984 B | 344,064 B | 343,368 B | 344,064 B |
-| RAM code | 31,436 B | 32,512 B | 32,188 B | 32,512 B |
+| RAM code | 31,440 B | 32,512 B | 32,188 B | 32,512 B |
 
 The pool and RAM-code margins are small on both products (1,080 B and 1,076 B on the FM-1, 696 B and 324 B on the SMK-37 Pro).
 

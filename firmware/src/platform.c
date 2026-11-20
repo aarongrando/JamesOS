@@ -248,6 +248,8 @@ static void platform_audio_block_done(int32_t *out, uint32_t n)
 #include "fm1_clock_snapshot.h"
 /* Implemented in dinghy.c, where this file's in_audio and br_ui are visible. */
 void fm1_fault_diag_context_snapshot(uint32_t out[2]);
+/* Implemented in dinghy.c: repaint the whole instrument screen (after an update screen that returned). */
+void fm1_screen_restore(void);
 #include "fm1_clock_measure.h"
 #include "fm1_irq.h"
 #include "fm1_guard.h"
@@ -1587,6 +1589,7 @@ static int br_poly_before_update(void);      /* polyphony (SMK-37 Pro): voices q
 #if BR_CAP_READER
 static int br_reader_frame(const uint8_t *p, uint32_t n);   /* instrument_reader.h */
 #endif
+static uint32_t ota_screen_until;          /* when the update notice gives way to the instrument */
 static void platform_poll(void)
 {
     static int32_t knob_avg = 512 * 16;
@@ -1605,6 +1608,10 @@ static void platform_poll(void)
     }
 #endif
     ota_service();
+    if (ota_screen_until && (int32_t)(fm1_ms - ota_screen_until) >= 0) {
+        ota_screen_until = 0u;                  /* the refused or failed update's notice has been seen */
+        fm1_screen_restore();
+    }
     if (usb.ota_req) {
 #if BR_CAP_POLY && defined(FM1_DEVICE) && defined(FM1_PATTERN_TARGET_EXPERIMENT) && FM1_PATTERN_TARGET_EXPERIMENT
         if (!br_poly_before_update()) return;
@@ -1612,6 +1619,7 @@ static void platform_poll(void)
         usb.ota_req = 0;
 #if BR_PRODUCT_SMK37
         if (ota_flash_ok) ota_session();
+        ota_screen_until = (fm1_ms + 2000u) | 1u;   /* returns only if nothing was committed */
 #else
         if (flash_ok) {
             uint32_t irq = irq_save();
@@ -1622,6 +1630,7 @@ static void platform_poll(void)
             mi_r = mi_w;
             irq_restore(irq);
             ota_session();                      /* returns only if nothing was committed */
+            ota_screen_until = (fm1_ms + 2000u) | 1u;
             irq = irq_save();
             /* Discard wire bytes accumulated during a failed/refused update;
              * the foreground releases any notes whose offs may have been lost. */

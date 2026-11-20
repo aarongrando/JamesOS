@@ -518,6 +518,7 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
     if (cmd == 0x9cu && !n) {                    /* read-only clock and power registers (hal/fm1_clock_probe.h) */
         uint32_t words[19], irq = irq_save();
         fm1_clock_probe_words(words, fm1_boot.p3_rst, fm1_boot.rst_src);
+        words[0] |= (uint32_t)smk37_official_cleanup << 8;   /* bit 8: this boot erased a staged official loader */
         irq_restore(irq);
         for (i = 0u; i < 19u; ++i) br_diagnostic_word(reply + 4u * i, words[i]);
         *reply_n = 76u; return 1;

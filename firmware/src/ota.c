@@ -23,10 +23,15 @@
  *
  * SMK-37 Pro (BR_PRODUCT_SMK37), as built in the JamesOS-K tree. In the app (platform.c defines
  * SMK37_UPDATES; the loader, which includes this file too, does not): staging at
- * [0xBB000, 0xC0000) (hal/smk37/smk37_flash_map.h), stricter package bounds, only Felucca's own
- * loader carrying both marks "FELUCCA-LOADER-1JAMESOS-K-SMK37!" is accepted (never the
- * official one), and the record names "ota-SMK-37 Pro_016" with its NUL. In app and loader: a
- * failed update erases the staging area only if something was staged.
+ * [0xBB000, 0xC0000) (hal/smk37/smk37_flash_map.h) and stricter package bounds. Two loaders are
+ * accepted: Felucca's own carrying both marks "FELUCCA-LOADER-1JAMESOS-K-SMK37!" (app area only;
+ * the record names "ota-SMK-37 Pro_016"), and the official one, which rewrites the whole flash
+ * image including the boot area. The official one is staged only when the package's boot area
+ * differs from this unit's and passes the same chip key and image CRC checks as on the FM-1; its
+ * record names "ota-" + this unit's identity, the name it then answers under. When the boot area
+ * already equals the package's, the app reads 0xE0000002 once (a notice to the host) and stops
+ * before staging. In app and loader: a failed update erases the staging area only if something
+ * was staged.
  */
 #include "../product.h"
 #if BR_PRODUCT_SMK37 && defined(SMK37_UPDATES)
@@ -325,13 +330,18 @@ static int ota_head_key(uint32_t fl_off, int device, uint32_t *key)
     return -1;
 }
 
+#if BR_PRODUCT_SMK37 && defined(SMK37_UPDATES)
+#define OTA_OFFICIAL_MAX SMK37_APP_HI            /* the SMK-37 package image: boot area + app */
+#else
+#define OTA_OFFICIAL_MAX 0x93000u
+#endif
 /* A mismatching official head may be passed only after checking both chip
  * keys, the encrypted app header and the entire declared flash image CRC.
  * CRC is not authentication; the host must supply stable, trusted bytes. */
 static int ota_official_compatible(uint32_t off,uint32_t len,uint32_t want,uint8_t b[512])
 {
     uint32_t current, target, i, j, k, c=0, n;
-    if (len<0x4020u || len>0x93000u || ota_head_key(0,1,&current) ||
+    if (len<0x4020u || len>OTA_OFFICIAL_MAX || ota_head_key(0,1,&current) ||
         ota_head_key(off,0,&target) || current!=target) return 0;
     if (ota_read(off+0x4000u,b,32)) return 0;
     k=current;
@@ -347,6 +357,7 @@ static int ota_official_compatible(uint32_t off,uint32_t len,uint32_t want,uint8
 
 #if BR_PRODUCT_SMK37
 static uint8_t ota_stage_dirty;
+static uint8_t ota_stage_official;               /* the staged loader is the official one */
 #endif
 
 static int ota_stage(void)                       /* steps 1..6; 0 = host said success */
@@ -357,6 +368,7 @@ static int ota_stage(void)                       /* steps 1..6; 0 = host said su
     /* 1. UFW header + entry list */
 #if BR_PRODUCT_SMK37
     ota_stage_dirty = 0;
+    ota_stage_official = 0;
 #endif
     ota_show(1, 0);
     if ((rc = ota_ufw(hdr, &fl_off, &fl_len, &ota_off, &ota_len, &fl_crc)) != 0)
@@ -381,11 +393,29 @@ static int ota_stage(void)                       /* steps 1..6; 0 = host said su
         ota_rd32(b + 0x20 + 8) != 0x01C0A800u)
         return -7;
 #if BR_PRODUCT_SMK37 && defined(SMK37_UPDATES)
-    (void)official;
-    (void)mine;
+    official = ota_rd16(b) == OTA_LDR_HCRC && ota_rd16(b + 2) == OTA_LDR_DCRC && len == OTA_LDR_LEN;
     for (i = 0x48u, own = 0; i + 32u <= 0x48u + 64u && !own; i++)
         own = ota_memeq(b + i, (const uint8_t *)"FELUCCA-LOADER-1JAMESOS-K-SMK37!", 32u);
-    if (!own || ota_rd32(b + 0x20 + 4) > 0x14000u) return -7;
+    if (own && ota_rd32(b + 0x20 + 4) > 0x14000u) return -7;
+    if (!own && !official) return -7;
+    if (!own) {                        /* the official loader rewrites the boot area too */
+        uint32_t mismatch = 0;
+        ota_show(2, 0);
+        for (i = 0; i < 0x4000u; i += 512u) {
+            if (ota_read(fl_off + i, b, 512) || ota_fread(i, mine, 512))
+                return -4;
+            if (!ota_memeq(b, mine, 512)) mismatch = 1;
+        }
+#ifndef BR_OTA_OFFICIAL_SAME_HEAD_TEST
+#define BR_OTA_OFFICIAL_SAME_HEAD_TEST 0         /* test builds only: stage it even for the same boot area */
+#endif
+        if (!mismatch && !BR_OTA_OFFICIAL_SAME_HEAD_TEST) {   /* already this boot area: nothing to write */
+            (void)ota_read(0xE0000002u, b, 8);
+            return -16;
+        }
+        if (!ota_official_compatible(fl_off, fl_len, fl_crc, b)) return -5;
+        ota_stage_official = 1u;
+    }
 #else
     official = ota_rd16(b) == OTA_LDR_HCRC && ota_rd16(b + 2) == OTA_LDR_DCRC && len == OTA_LDR_LEN;
     for (i = 0x48, own = 0; i + 16u <= 0x48u + 64u && !own; i++)    /* first LZ4 literals: crt0_ldr.S */
@@ -481,11 +511,17 @@ static int ota_session(void)
 #if BR_PRODUCT_SMK37
 #if defined(SMK37_UPDATES)
     static const char record_name[] = "ota-SMK-37 Pro_016";
+    static const char record_official[] = "ota-" FELUCCA_ID;   /* the official loader answers under this name */
+    _Static_assert(sizeof record_official <= 64u, "record name field");
+    const char *name = ota_stage_official ? record_official : record_name;
+    uint32_t name_len = ota_stage_official ? sizeof record_official : sizeof record_name;
 #else
     static const char record_name[] = "ota-FM-1_015";
+    const char *name = record_name;
+    uint32_t name_len = sizeof record_name;
 #endif
-    for (i = 0; i < sizeof record_name; i++)
-        parm[8 + i] = (uint8_t)record_name[i];
+    for (i = 0; i < name_len; i++)
+        parm[8 + i] = (uint8_t)name[i];
 #else
     for (i = 0; i < 12u; i++)
         parm[8 + i] = (uint8_t)"ota-FM-1_015"[i];    /* the loader's own USB identity */
@@ -515,6 +551,23 @@ static int ota_session(void)
     }
     return 0;
 }
+
+#if BR_PRODUCT_SMK37 && defined(SMK37_UPDATES)
+/* SMK-37 boot: the official loader rewrote the flash and restarted into this app, but its staged
+ * copy (head 'LOADER.BIN', length OTA_LDR_LEN + 32) and the start record stay in the window. Erase
+ * the window then, as the FM-1 does after every update, so a later start cannot enter that loader
+ * again. Anything else in the window (Felucca's own loader) is left as before. 1 = erased. */
+static int ota_boot_cleanup_official(void)
+{
+    uint8_t h[32];
+    if (ota_fread(OTA_AREA, h, 32) || ota_crc16(h + 2, 30, 0) != ota_rd16(h) ||
+        ota_rd32(h + 4) != OTA_AREA || ota_rd32(h + 8) != OTA_LDR_LEN + 32u ||
+        !ota_memeq(h + 16, (const uint8_t *)"LOADER.BIN", 10))
+        return 0;
+    ota_unstage();
+    return 1;
+}
+#endif
 
 /* boot: a staging area left over (we are running, so the update finished or
  * never started): erase it so the SPL does not re-enter the loader */

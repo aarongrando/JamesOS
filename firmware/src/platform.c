@@ -530,6 +530,7 @@ static int32_t fm1_battery_level(void) { return fm1_battery_bars(&fm1_battery, f
 #include "fm1_cpu1_cache_start.h"
 #if BR_PRODUCT_SMK37
 static uint8_t flash_ok, ota_flash_ok;          /* storage claimed; flash chip known (updates, rescue) */
+static uint8_t smk37_official_cleanup;          /* this boot erased a staged official loader (probe 0x9C word 0) */
 #else
 static uint8_t flash_ok;
 #endif
@@ -877,7 +878,7 @@ static void ota_show(uint32_t step, int32_t code)
     if (step < 9u)
         draw_text_box(0, 124, 240, 2u, STEP[step < 6u ? step : 0], C_WHITE, 1);
     else
-        draw_text_box(0, 124, 240, 2u, code == 1 ? "DRY RUN OK" : "FAILED", C_WHITE, 1);
+        draw_text_box(0, 124, 240, 2u, code == 1 ? "DRY RUN OK" : code == -16 ? "CLOCK ALREADY SET" : "FAILED", C_WHITE, 1);
 }
 static int ota_commit(const uint8_t *parm)
 {
@@ -2457,6 +2458,7 @@ void fm1_cstart(void)
     if (boot_mode == BOOT_RECOVERY || recovery_key())
         recovery_main();                        /* OCT- at power-on: the USB rescue */
 #if BR_PRODUCT_SMK37
+    if (ota_flash_ok) smk37_official_cleanup = (uint8_t)ota_boot_cleanup_official();
     flash_ok = (uint8_t)smk37_store_enable();
 #else
     if (flash_worker_park() == 0) {

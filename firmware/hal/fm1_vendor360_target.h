@@ -104,6 +104,24 @@ static int fm1_vp_target_eligible(void *opaque, const fm1_vp_sample_t *sample)
     return 1;
 }
 
+/* SMK family: read-only check, before any attempt is recorded, that this boot is in exactly the entry
+ * state the step is qualified for (a known P33 entry profile, a safe regulator mode, the 396 MHz clock
+ * fingerprint). The stock SMK boot area (360 MHz) never matches, so those boots keep their supply as
+ * before and never enter rescue for it. The stock SMK application runs the same vendor supply routine
+ * as M-VAVE V15 (its code matches the V15 block apart from call offsets). */
+static int fm1_vp_target_preflight(fm1_vp_target_t *target)
+{
+    fm1_vp_sample_t sample;
+    uint32_t i, mode;
+    for (i = 0u; i < FM1_VP_COUNT; ++i)
+        if (!fm1_p33_checked_read(&target->bus, fm1_vp_reg(i), &sample.raw[i]) || sample.raw[i] > 0xffu)
+            return 0;
+    if (target->bus.timeouts) return 0;
+    mode = sample.raw[0] & 0x0cu;
+    if (mode != 0x04u && mode != 0x08u) return 0;
+    return fm1_vp_target_eligible(target, &sample);
+}
+
 static fm1_vp_io_t fm1_vp_target_ops(fm1_vp_target_t *target)
 {
     fm1_vp_io_t io = { target, fm1_vp_target_read, fm1_vp_target_write,

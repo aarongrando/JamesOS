@@ -1,4 +1,4 @@
-# Changelog: 1.0a (build 2108) to 1.0b (builds 3083 and 3110)
+# Changelog: 1.0a (build 2108) to 1.0b (builds 3083, 3110 and 3120)
 
 Terse and dated. Sources: `git log 21c4fcb..HEAD` (about 600 commits), the build scripts and candidate folders of 16 and 17 November 2026 and the release records. Times are local to the build machine.
 
@@ -8,7 +8,7 @@ Reading guide:
 - Git history is grouped by day because most builds were not committed one by one. The 16 November source was committed in three integration commits and, after build 3077, in one commit that holds the whole working tree.
 - **NOT RECONSTRUCTED** marks a range where the builds exist or are numbered but their individual contents could not be recovered from the records available.
 - Items are firmware changes unless they say test, tool or documentation.
-- Build 3083 was the first 1.0b release, built from commit `c7c010b`. Build 3110 of 19 November 2026 replaces it; its changes are listed in `docs/RELEASE-1.0b.md` under "Changes in build 3110", with the package hashes.
+- Build 3083 was the first 1.0b release, built from commit `c7c010b`. Build 3110 of 19 November 2026 replaced it, and build 3120 of 20 November 2026 replaces that; their changes are listed in `docs/RELEASE-1.0b.md` under "Changes in build 3120" and "Changes in build 3110", with the package hashes.
 
 ## Summary table
 
@@ -37,6 +37,8 @@ Reading guide:
 | 3081 | 16 Nov, about 23:41 | `567b79e` | JamesOS-K fader link covers the drum bank. Owner checked on hardware: SMK-37 Pro button layout, DX7-style sounds, arranger loop-off icon. | Complete. |
 | 3082 | 17 Nov, about 00:06 | `5133a60` | JamesOS-K GLOBAL starts on PAN and the mixer is not in the GLOBE ring. Budgets recorded for this build. | Complete. |
 | 3083 | 17 Nov | `c7c010b` | Final candidate. Adds the KEY TRACK switch in the track colour (`47a91c3`) and the JamesOS-K drum ARP cue `SWITCH TO T1 T2 T3` (`170a90b`), regenerated test baselines and the release documents. | Built and installed on both products. |
+| 3110 | 19 Nov | `c685728` | Second-core late-block fix, two kit click fixes, lower processor load. See "Changes in build 3110" in `docs/RELEASE-1.0b.md`. | Published. |
+| 3120 | 20 Nov | `c2d3f28` | Polyphony mix without clipping, SMK-37 family install from stock firmware at 396 MHz with the supply step and store fix. See "Changes in build 3120". | Published. |
 
 ## 9 to 15 November: daily detail (builds 2109 to 3006, not mapped to builds)
 

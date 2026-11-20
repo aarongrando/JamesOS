@@ -162,7 +162,7 @@ def known_macros(tgt=None, with_poly=None):
     return {'BR_PRODUCT_ID_FM1': 1, 'BR_PRODUCT_ID_SMK37': 2, 'BR_PRODUCT': 2 if smk else 1,
             'BR_PRODUCT_FM1': 1 - smk, 'BR_PRODUCT_SMK37': smk,
             'BR_CAP_PADS': smk, 'BR_CAP_FADERS': smk, 'BR_CAP_WHEELS': smk, 'BR_CAP_VELOCITY': smk,
-            'BR_CAP_DIN_MIDI': 1 - smk, 'BR_CAP_SUPPLY396': 1 - smk, 'BR_CAP_POLY': p,
+            'BR_CAP_DIN_MIDI': 1 - smk, 'BR_CAP_SUPPLY396': 1, 'BR_CAP_POLY': p,
             # product.h defines the poly engine switch (value 1) only when BR_CAP_POLY is 1
             'BR_POLY_SCHEDULER_EXPERIMENT': 1 if p else None,
             'defined(BR_POLY_SCHEDULER_EXPERIMENT)': p,

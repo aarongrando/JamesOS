@@ -4173,6 +4173,7 @@ static uint32_t br_poly_model_mod_active(const br_mod_config_t *m)
 }
 #endif
 static uint32_t br_poly_mix_gain_q15;
+#define BR_POLY_MIX_CEILING 24576u   /* the master limiter knee (instrument_fx.c BR_MASTER_LIMIT_KNEE) */
 #define BR_POLY_STANDARD_GRAPH (!br_poly_scheduler_enabled)
 BR_COLD_SIZE static uint32_t br_poly_scheduler_is_enabled(void) { return br_poly_scheduler_enabled; }
 BR_COLD_SIZE static uint32_t br_poly_scheduler_deferred_pending(void)
@@ -4598,16 +4599,26 @@ static int32_t br_poly_scheduler_post(uint32_t part, int32_t *row, uint32_t n)
         uint32_t magnitude = row[i] < 0 ? 0u - (uint32_t)row[i] : (uint32_t)row[i];
         if (magnitude > peak) peak = magnitude;
     }
-    uint32_t target = peak > 32767u ? (32767u * 32768u) / peak : 32768u;
-    if (target < br_poly_mix_gain_q15) br_poly_mix_gain_q15 = target;
-    else if (target > br_poly_mix_gain_q15) {
-        uint32_t step = (target - br_poly_mix_gain_q15) / 16u;
-        br_poly_mix_gain_q15 += step ? step : 1u;
+    /* Mix gain: the chord is scaled to peak at the master limiter's knee (BR_POLY_MIX_CEILING), so the
+     * limiter stays linear on chords. The gain ramps across the block from the previous block's value
+     * (a step at the block edge clicks), falls to the new target within the block and recovers by 1/64 of
+     * the distance per block (about 370 ms). */
+    uint32_t from = br_poly_mix_gain_q15, to = from;
+    uint32_t target = peak > BR_POLY_MIX_CEILING ? (BR_POLY_MIX_CEILING * 32768u) / peak : 32768u;
+    if (target < from) to = target;
+    else if (target > from) {
+        uint32_t step = (target - from) / 64u;
+        to = from + (step ? step : 1u);
     }
+    br_poly_mix_gain_q15 = to;
+    int32_t gain_acc = (int32_t)(from << 8);
+    int32_t gain_step = n ? (((int32_t)to - (int32_t)from) * 256) / (int32_t)n : 0;
     /* The filter's controls are constant over the block: scale and sum the input, then filter the row in one call
      * (bit-identical to calling the per-sample filter inside the loop). */
     for (uint32_t i = 0; i < n; ++i) {
-        int32_t sample = br_clip(br_filter_mul_q15(row[i], br_poly_mix_gain_q15), -32767, 32767);
+        gain_acc += gain_step;
+        uint32_t g = i + 1u == n ? to : (uint32_t)(gain_acc >> 8);
+        int32_t sample = br_clip(br_filter_mul_q15(row[i], g), -32767, 32767);
         sum += sample;
         row[i] = sample;
     }
@@ -5135,12 +5146,9 @@ uint32_t br_audio_worker_sources(void *opaque_job)
                 for (lane = 0u; lane < BR_AUDIO_KIT_JOB_LANES; ++lane)
                     sample += br_audio_kit_partial[0][lane][i];
                 br_comp_key[job->part][i] = 0;
-#if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
-                if (br_mode[job->part] == 4u) {
-                    if (sample > 32767) sample = 32767;
-                    if (sample < -32768) sample = -32768;
-                }
-#endif
+                /* No 16-bit clip here: br_poly_scheduler_post measures this sum's peak and scales the mix
+                 * below 16 bits. Clipping first hid the peak from it (gain stayed at unity) and hard-clipped
+                 * the voices, an audible crackle with a few loud voices. At most BR_POLY_VOICES * 32767. */
                 job->output[i] = sample;
             }
         } else

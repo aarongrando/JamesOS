@@ -79,7 +79,7 @@
 #define BR_CAP_WHEELS     BR_PRODUCT_SMK37   /* pitch bend and mod wheel */
 #define BR_CAP_VELOCITY   BR_PRODUCT_SMK37   /* velocity-sensing keys */
 #define BR_CAP_DIN_MIDI   BR_PRODUCT_FM1     /* UART (DIN) MIDI */
-#define BR_CAP_SUPPLY396  BR_PRODUCT_FM1     /* 396 MHz supply step at boot (vendor360) */
+#define BR_CAP_SUPPLY396  1                  /* 396 MHz supply step at boot (vendor360); SMK-37: only from the qualified 396 entry state */
 
 /* ---- polyphony: build option for either product (default: SMK-37 on, FM-1 off) ---- */
 #if !defined(BR_CAP_POLY) && defined(BR_POLY_SCHEDULER_EXPERIMENT)

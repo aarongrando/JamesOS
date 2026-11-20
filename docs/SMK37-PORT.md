@@ -15,7 +15,7 @@ Updated 17 November 2026 against the source tree for candidate build 3083. State
 | `BR_CAP_WHEELS` (pitch bend, mod wheel) | 0 | 1 |
 | `BR_CAP_VELOCITY` (velocity keys) | 0 | 1 |
 | `BR_CAP_DIN_MIDI` (DIN MIDI) | 1 | 0 |
-| `BR_CAP_SUPPLY396` (396 MHz supply step at boot) | 1 | 0 |
+| `BR_CAP_SUPPLY396` (396 MHz supply step at boot) | 1 | 1, only from the qualified 396 MHz entry state |
 | `BR_CAP_READER` (screen reader, see [SCREEN-READER.md](SCREEN-READER.md)) | 1 | 1 |
 
 `BR_CAP_POLY` (stopped-transport polyphony) is the one capability a build may choose. `tools/build.py` turns it on for device candidates of both products; `--no-polyphony` turns it off. Builds that are not device candidates never include it. See [SMK37-POLYPHONY.md](SMK37-POLYPHONY.md). The comment in `firmware/product.h` that says FM-1 polyphony is off by default describes the header default, not what `tools/build.py` passes for FM-1 device candidates.
@@ -113,7 +113,7 @@ All ranges have exclusive ends (`firmware/hal/smk37/smk37_flash_map.h`). The loa
 | `0xBB000-0xC0000` | Update staging (20 KiB) |
 | `0xC0000-0x100000` | Bluetooth data, factory calibration and other stock data, preserved (never written by the app) |
 
-Project offsets are logical and are translated around the two occupied sectors in the flash layer. The firmware claims the project and settings sectors only when every sector in them is erased or the owner tag `JamesOS-K store 1` already exists. A different unit with data in those sectors keeps its data and reports storage unavailable. A general storage allocator has not been written. The updater accepts only a loader that carries both the Felucca loader mark and the JamesOS-K SMK-37 mark.
+Project offsets are logical and are translated around the two occupied sectors in the flash layer. The firmware claims the project and settings sectors only when every sector in them is erased or the owner tag `JamesOS-K store 1` already exists. A different unit with data in those sectors keeps its data and reports storage unavailable. One exception: the stock firmware's spent update record in the owner sector (its own address, then `LOADER.BIN`) is erased when the project and settings sectors are erased; the maker's loader leaves it there after an install from stock firmware. A general storage allocator has not been written. The updater accepts only a loader that carries both the Felucca loader mark and the JamesOS-K SMK-37 mark.
 
 Projects use session format v20 inside project envelope v6, the same as the FM-1. The browser Editor transfers projects for the FM-1 only; SMK-37 Pro transfer has not been qualified.
 

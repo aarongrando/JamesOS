@@ -1,6 +1,6 @@
 # JamesOS 1.0b
 
-**Build 3120, 20 November 2026.** This is the source at the `v1.0b-build-3120` tag. Build 3083 of 17 November 2026 was the first 1.0b release, at the `v1.0b` tag, and build 3110 of 19 November 2026 followed it at the `v1.0b-build-3110` tag; [Changes in build 3120](#changes-in-build-3120) and [Changes in build 3110](#changes-in-build-3110) list what is different. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
+**Build 3122, 20 November 2026.** This is the source at the `v1.0b-build-3122` tag. Build 3083 of 17 November 2026 was the first 1.0b release, at the `v1.0b` tag, and build 3110 of 19 November 2026 followed it at the `v1.0b-build-3110` tag; [Changes in build 3122](#changes-in-build-3122) and [Changes in build 3110](#changes-in-build-3110) list what is different. The packages were built from it: its `firmware/` folder and `tools/build.py` are the ones used for the build.
 
 JamesOS is an independent firmware project by Aaron Grando (a.k.a. James Os) and Gjelly for the M-VAVE FM-1. It builds a second product, JamesOS-K, for the M-VAVE SMK-37 Pro, from the same source tree. This page lists what changed since 1.0a build 2108 (9 November 2026), what changes for existing users, what is known to be wrong, and what has and has not been checked.
 
@@ -10,19 +10,19 @@ Firmware switching can overwrite another firmware's saved data. Back up saved wo
 
 | Product | Device | Identity | Update loader | App package SHA-256 | Size |
 | --- | --- | --- | --- | --- | --- |
-| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673120` | `ota-FM-1_904` | `3106ec9a76b31c59a05235843b2bacd1ddc29cf00db29b17e123ac5724bb926c` | 610,554 B |
-| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653120` | `ota-SMK-37 Pro_9260001` | `e5941d44182a7de0bcdfb082e5bdd70b21c7aa3c93707370f7892153eac859b9` | 651,472 B |
-| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673120` | `ota-FM-1_015` | `c2a11bfb4099e5f8f25de9b9085b27b85d02fd8fed607ac44f1970e1e5b3cfb8` | 623,125 B |
-| JamesOS-K package for an SMK-37 family keyboard on stock firmware | SMK-37 Pro, SMK-37 Elite, Donner Starrykey 37 Play, EROK MKE-P37 | `SMK-37 Pro_9653120` | `ota-` followed by the stock identity, for example `ota-MKE-P37_004` | `e424bd819055f020ad4355ce0c48a28c73b36b181f18a43f2b4a481b71d88c0b` | 664,085 B |
+| JamesOS 1.0b | M-VAVE FM-1 | `FM-1_9673122` | `ota-FM-1_904` | `16f5c78109afd7d155f2aadc65d093757f32af081d823aaec50e29e34a56be4e` | 610,554 B |
+| JamesOS-K 1.0b | M-VAVE SMK-37 Pro | `SMK-37 Pro_9653122` | `ota-SMK-37 Pro_9260001` | `79be2708f2f133c4505d2165cfd6d09766634cbca0c456f071440e1eea1cdd98` | 651,472 B |
+| FM-1 package for a stock V15 unit | M-VAVE FM-1 | `FM-1_9673122` | `ota-FM-1_015` | `790cf8a51e64a52e913b9fd1c722244ec1c4c47edecf708dee4ca739b20cc1a3` | 623,125 B |
+| JamesOS-K package for an SMK-37 family keyboard on stock firmware, or on JamesOS-K 3122 or later at 360 MHz | SMK-37 Pro, SMK-37 Elite, Donner Starrykey 37 Play, EROK MKE-P37 | `SMK-37 Pro_9653122` | `ota-` followed by the identity it was started from, for example `ota-MKE-P37_004` | `08593126b1db5e90d37f75edf3f1664517405a4db9a9115fba35ba11b040a683` | 664,085 B |
 | Source archive | | | | published beside the archive | |
 
 The loader identifiers are the ones each package reports while it updates. The two packages for stock firmware carry the maker's update loader and write the boot area with the 396 MHz clock profile.
 
 Each package is built with `tools/build.py` and the flags in the README. The exact command for the final build is recorded in `BUILD-REPRODUCIBILITY.txt` in its source archive. Both update packages rebuild byte for byte from that source archive with the same toolchain and SDK.
 
-## Changes in build 3120
+## Changes in build 3122
 
-Build 3120 installs over build 3110. Projects, sounds and settings carry over.
+Build 3122 installs over build 3110. Projects, sounds and settings carry over.
 
 Fixes:
 
@@ -34,7 +34,9 @@ SMK-37 family:
 - A JamesOS-K package for stock firmware writes the FM-1's 396 MHz boot area with the maker's update loader. The stock firmware of the SMK-37 Pro, SMK-37 Elite, Donner Starrykey 37 Play and EROK MKE-P37 stages it.
 - At 396 MHz JamesOS-K now runs the maker's supply step at start (the same step the FM-1 build runs and the stock SMK firmware runs). It runs only from the exact entry state it is qualified for: a known supply register profile, a safe regulator mode and the 396 MHz clock fingerprint. Other starts, including the stock 360 MHz boot area, write and record nothing. Without the step, polyphony could stall the second core.
 - The store claim erases the stock firmware's spent update record in the owner sector (its own address, then `LOADER.BIN`) when the project and settings areas are erased. After an install from stock firmware this record locked the store.
-- An update from an earlier JamesOS-K keeps the keyboard's boot area and clock profile.
+- An update from an earlier JamesOS-K keeps the keyboard's boot area and clock profile, as before.
+- A keyboard on JamesOS-K 3122 or later can be moved to the 396 MHz boot area on request: its app stages the maker's loader for the stock-firmware package, as the FM-1 app does, after the same chip key and whole-image CRC checks (image bound 0x9D000). The loader answers as `ota-` followed by the app's identity. When the keyboard already has the package's boot area, the app asks the host for 0xE0000002 and stops before staging (screen: `CLOCK ALREADY SET`).
+- On the next start the app erases a staged maker's loader and its start record from the update window, as the FM-1 does after an update.
 
 Sound:
 
@@ -163,12 +165,12 @@ These come from a host audit of the sequencer and clock code. None is a regressi
 
 ## Memory budgets
 
-Build 3120. Limits come from `tools/build.py` and `firmware/product.h`.
+Build 3122. Limits come from `tools/build.py` and `firmware/product.h`.
 
 | Budget | FM-1 used | FM-1 limit | SMK-37 Pro used | SMK-37 Pro limit |
 | --- | --- | --- | --- | --- |
-| Application image | 513,072 B | 581,564 B | 530,036 B | 619,520 B |
-| `.data` + `.bss` | 85,568 B | 98,304 B | 86,112 B | 98,304 B |
+| Application image | 513,104 B | 581,564 B | 530,916 B | 619,520 B |
+| `.data` + `.bss` | 85,568 B | 98,304 B | 86,624 B | 98,304 B |
 | Designated pool | 342,984 B | 344,064 B | 343,368 B | 344,064 B |
 | RAM code | 31,436 B | 32,512 B | 32,188 B | 32,512 B |
 

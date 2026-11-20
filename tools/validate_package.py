@@ -258,13 +258,15 @@ def validate(raw, app=None, loader=None, expected_identity=None):
         require(0 < packed <= 4096 and 0 < unpacked <= 4096, "OTA LZ4 block extent")
         expanded += lz4_block(cut(ota, pos, packed, "OTA LZ4 block"), unpacked, expanded); pos += packed
     require(len(expanded) == inner["offset"] and crc(expanded) == inner["crc"], "expanded OTA image CRC/length")
-    vendor_ota = not smk37 and hashlib.sha256(ota).hexdigest() == MVAVE_V15_OTA_SHA256
+    # The SMK-37 family's stock update loader is byte-identical to the FM-1 V15 vendor loader. A JamesOS-K
+    # from-stock package carries it, like the FM-1 from-V15 package; it writes the whole flash including the boot area.
+    vendor_ota = hashlib.sha256(ota).hexdigest() == MVAVE_V15_OTA_SHA256
     require(vendor_ota or b"FELUCCA-LOADER-1" in expanded, "unknown RAM update-loader protocol")
-    if smk37:
+    if smk37 and not vendor_ota:
         require(b"FELUCCA-LOADER-1JAMESOS-K-SMK37!" in expanded[:64], "wrong SMK-37 loader")
     if loader is not None: require(bytes(expanded) == loader, "packaged loader differs from built RAM program")
     return {"identity": identity, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-            "loader_identity": "ota-FM-1_015" if vendor_ota else loader_identity(expanded, smk37=smk37),
+            "loader_identity": ("ota-SMK-37 family stock loader" if smk37 else "ota-FM-1_015") if vendor_ota else loader_identity(expanded, smk37=smk37),
             "loader_identity_source": "pinned V15 loader; hardware-observed" if vendor_ota else "embedded loader string",
             "app_slot": app_slot, "app_bytes": len(app) if app is not None else None,
             "ota_bytes": len(expanded), "chip": "AC791N", "format_valid": True}

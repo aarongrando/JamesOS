@@ -259,6 +259,9 @@ void fm1_fault_diag_context_snapshot(uint32_t out[2]);
 #include "fm1_cpu1_worker.h"
 #include "fm1_cpu1_worker_target_hw.h"
 #include "fm1_vendor360_target.h"
+#if BR_PRODUCT_SMK37 && defined(FM1_DEVICE) && defined(BR_CLOCK_PROBE) && BR_CLOCK_PROBE
+#include "fm1_clock_probe.h"
+#endif
 #include "fm1_ram_code_guard.h"
 #if FM1_DRUM_PROFILE
 #include "../hal/fm1_drum_profile.c"
@@ -566,28 +569,53 @@ static int st_read(uint32_t off, void *dst, uint32_t n)
 }
 
 #if BR_PRODUCT_SMK37
+/* The stock firmware stages the vendor update loader at the owner sector: a record that names its own
+ * address, then "LOADER.BIN" (observed on MKE-P37 004 after a from-stock install). Once that update has
+ * finished the record is spent, so it is the one non-erased content the claim may erase. */
+static int smk37_stock_staging_record(const uint8_t *p)
+{
+    static const uint8_t name[] = "LOADER.BIN";
+    uint32_t i, at = (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24;
+    if (at != SMK37_STORE_OWNER) return 0;
+    for (i = 0; i < sizeof name; ++i)
+        if (p[16u + i] != name[i]) return 0;
+    return 1;
+}
+
 /* Claim only erased space. An existing stock or third-party store stays
- * readable in its own firmware; JamesOS-K never reclaims it implicitly. */
+ * readable in its own firmware; JamesOS-K never reclaims it implicitly.
+ * The one exception is a spent stock update record in the owner sector. */
 static int smk37_store_enable(void)
 {
     const uint8_t tag[] = "JamesOS-K store 1";
     uint8_t page[256];
-    uint32_t off, i;
+    uint32_t off, i, staging, took;
     int rc;
-    if (!ota_flash_ok || st_read(SMK37_STORE_OWNER, page, sizeof tag)) return 0;
+    if (!ota_flash_ok || st_read(SMK37_STORE_OWNER, page, 32u)) return 0;
     for (i = 0; i < sizeof tag && page[i] == tag[i]; ++i) {}
     if (i == sizeof tag) return 1;
+    staging = smk37_stock_staging_record(page);
     for (off = SMK37_PROJECT_LO; off < SMK37_PROJECT_HI; off += sizeof page) {
         if (st_read(off, page, sizeof page)) return 0;
         for (i = 0; i < sizeof page; ++i)
             if (page[i] != 0xffu) return 0;
         fm1_wdt_feed();
     }
-    for (off = SMK37_SETTINGS_LO; off < SMK37_STORE_HI; off += sizeof page) {
+    for (off = SMK37_SETTINGS_LO; off < (staging ? SMK37_STORE_OWNER : SMK37_STORE_HI); off += sizeof page) {
         if (st_read(off, page, sizeof page)) return 0;
         for (i = 0; i < sizeof page; ++i)
             if (page[i] != 0xffu) return 0;
         fm1_wdt_feed();
+    }
+    if (staging) {
+        if (flash_worker_park()) return 0;
+        rc = fl_erase4k(SMK37_STORE_OWNER, &took);
+        if (flash_worker_resume() || rc) return 0;
+        for (off = SMK37_STORE_OWNER; off < SMK37_STORE_HI; off += sizeof page) {
+            if (st_read(off, page, sizeof page)) return 0;
+            for (i = 0; i < sizeof page; ++i)
+                if (page[i] != 0xffu) return 0;
+        }
     }
     if (flash_worker_park()) return 0;
     rc = fl_write(SMK37_STORE_OWNER, tag, sizeof tag);
@@ -2276,6 +2304,11 @@ void fm1_cstart(void)
         if(fm1_vpd_requires_recovery(fm1_vpd_attempts)) {
             if(!fm1_vp_target_timer(&vp_target))for(;;) { }
             vp_rescue=1u;
+#if BR_PRODUCT_SMK37
+        } else if(!fm1_vp_target_preflight(&vp_target)) {
+            /* Not the qualified 396 entry state (for example the stock 360 MHz boot area):
+             * nothing is written and nothing is recorded; the boot area's supply stays. */
+#endif
         } else {
             prior_errors=reset_ctx.timeouts || wdt_ctx.timeouts || extra_ctx.timeouts ||
                 early_ctx.timeouts || fm1_p33_timeouts ||

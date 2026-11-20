@@ -514,6 +514,35 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
      * state that the still-running worker may own. */
     if (br_engine_pipeline_uncontained_fault_get() &&
         !br_pipeline_fault_command_allowed(cmd)) return 0;
+#if BR_PRODUCT_SMK37 && defined(FM1_DEVICE) && defined(BR_CLOCK_PROBE) && BR_CLOCK_PROBE
+    if (cmd == 0x9cu && !n) {                    /* read-only clock and power registers (hal/fm1_clock_probe.h) */
+        uint32_t words[19], irq = irq_save();
+        fm1_clock_probe_words(words, fm1_boot.p3_rst, fm1_boot.rst_src);
+        irq_restore(irq);
+        for (i = 0u; i < 19u; ++i) br_diagnostic_word(reply + 4u * i, words[i]);
+        *reply_n = 76u; return 1;
+    }
+    if (cmd == 0xa3u && !n) {                    /* read-only pad readings; the rise maxima restart on each read */
+        uint32_t irq = irq_save();
+        for (i = 0u; i < SMK_NPAD; ++i) {
+            uint16_t v[4] = {fm1_in.pad_raw[i], fm1_in.pad_base[i], smk_pad_probe_rise[i], smk_pad_probe_onsets[i]};
+            for (uint32_t k = 0u; k < 4u; ++k) { reply[8u*i+2u*k] = (uint8_t)v[k]; reply[8u*i+2u*k+1u] = (uint8_t)(v[k] >> 8); }
+            smk_pad_probe_rise[i] = 0u;
+        }
+        irq_restore(irq);
+        *reply_n = 8u * SMK_NPAD; return 1;
+    }
+    if (cmd == 0xa4u && !n) {                    /* read-only wheels, pedal, battery, faders and the mod amount */
+        uint32_t irq = irq_save();
+        uint16_t v[12] = {fm1_in.wheel[0], fm1_in.wheel[1], fm1_in.pedal, fm1_in.batt,
+                          fm1_in.fad_raw[0], fm1_in.fad_raw[1], fm1_in.fad_raw[2], fm1_in.fad_raw[3],
+                          br_ui.part < BR_SYNTH_PARTS ? br_smk_mod_wheel[br_ui.part] : 0u,
+                          (uint16_t)(fm1_in.pedal < 640u), (uint16_t)br_ui.part, 0u};
+        irq_restore(irq);
+        for (i = 0u; i < 12u; ++i) { reply[2u*i] = (uint8_t)v[i]; reply[2u*i+1u] = (uint8_t)(v[i] >> 8); }
+        *reply_n = 24u; return 1;
+    }
+#endif
 #if defined(FM1_DEVICE) && defined(FM1_PATTERN_DEVICE_CANDIDATE) && FM1_PATTERN_DEVICE_CANDIDATE && defined(FM1_PATTERN_RUNTIME_TARGET_LINK_ONLY) && FM1_PATTERN_RUNTIME_TARGET_LINK_ONLY
     if (br_import_state!=0u && (uint32_t)(fm1_ms-br_import_last_ms)>=120000u) { br_import_state=0; br_import_nonce=0; br_import_length=0; memset(br_diagnostic_chunks,0,sizeof br_diagnostic_chunks); }
     if (br_export_nonce && (uint32_t)(fm1_ms-br_export_last_ms)>=120000u) { br_export_nonce=0; br_export_length=0; }

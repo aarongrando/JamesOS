@@ -459,11 +459,20 @@ static SMK_SCAN void smk__padq(uint32_t pad, uint32_t vel)
     }
 }
 
+#if defined(BR_CLOCK_PROBE) && BR_CLOCK_PROBE
+/* Probe builds only (diagnostic 0xA3): the largest rise above the baseline while a pad is at rest, and
+ * the number of hit onsets, per pad. */
+static volatile uint16_t smk_pad_probe_rise[SMK_NPAD], smk_pad_probe_onsets[SMK_NPAD];
+#endif
 static SMK_SCAN void smk__pad(uint32_t p, uint32_t raw)
 {
     uint32_t base = fm1_in.pad_base[p], st = fm1_in.pad_st[p];
     fm1_in.pad_raw[p] = (uint16_t)raw;
     if (st == 0u) {
+#if defined(BR_CLOCK_PROBE) && BR_CLOCK_PROBE
+        if (raw > base && raw - base > smk_pad_probe_rise[p]) smk_pad_probe_rise[p] = (uint16_t)(raw - base);
+        if (raw > base + SMK_PAD_ON) ++smk_pad_probe_onsets[p];
+#endif
         if (raw > base + SMK_PAD_ON) {
             fm1_in.pad_st[p] = 1;
             fm1_in.pad_peak[p] = (uint16_t)raw;

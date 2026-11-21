@@ -141,13 +141,6 @@ int main(void)
           c[BR_UIT_INPUT_WORST], c[BR_UIT_INPUT_TOTAL]);
     CHECK(c[BR_UIT_BYTES] > 3u * 7200u && c[BR_UIT_DRAW_SENDING] > 3u && c[BR_UIT_FRAMES_SENDING] >= 3u,
           "bytes %u sending passes %u frames %u", c[BR_UIT_BYTES], c[BR_UIT_DRAW_SENDING], c[BR_UIT_FRAMES_SENDING]);
-#if BR_PRODUCT_SMK37
-    /* SMK-37: HOME (printed KNOB BANK) on the SOUNDS list is "next category", not "go HOME": leave SOUNDS
-     * by another page button first (the test sits on page 6, SOUNDS, after the SEL check above), then HOME. */
-    CHECK(button(BTN_ENV, 0u) == 1u, "ENV refused");
-    settle();
-    CHECK(where[3] == BR_PAGE_ENV, "ENV (leaving SOUNDS): page %u", where[3]);
-#endif
     CHECK(button(BTN_HOME, 0u) == 1u, "HOME refused");
     settle();
     CHECK(where[3] == BR_PAGE_HOME, "HOME (back from SOUNDS): page %u", where[3]);

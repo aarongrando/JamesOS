@@ -109,18 +109,20 @@ int main(void) {
               if (host_led_level_state[BTN_SEL] == FM1_LED_BRIGHT) ++on_blink; else ++off_blink; }
           assert(on_blink && off_blink); }
         br_hold_on = 0u;
-        /* KNOB BANK (logical HOME): next category on the synth SOUNDS list; HOME everywhere else. */
+        /* KNOB BANK (logical HOME) goes HOME from every page and menu, the SOUNDS list included. */
         tap(BTN_SEL); assert(br_sel_browse());
-        br_sel.cursor[0] = 0u; br_sel_move(0);
-        { const char *before = br_bank_category(br_sel.cursor[0]);
-          tap(BTN_HOME);
-          assert(br_sel_browse() && br_bank_category(br_sel.cursor[0]) != before && !strcmp(br_ui.message, br_bank_category(br_sel.cursor[0]))); }
-        tap(BTN_ENV); assert(br_ui.page == BR_PAGE_ENV && !br_sel.active);   /* any page button leaves the list */
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && !br_ui.screen[BR_PAGE_HOME] && !br_sel.active);
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && br_ui.screen[BR_PAGE_HOME] == 1u);   /* the second sound page */
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && !br_ui.screen[BR_PAGE_HOME]);
+        br_ui.screen[BR_PAGE_HOME] = 2u;                                      /* the HOME deep menu */
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && br_ui.screen[BR_PAGE_HOME] == 3u);   /* its second page */
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && !br_ui.screen[BR_PAGE_HOME]);
+        tap(BTN_ENV); assert(br_ui.page == BR_PAGE_ENV);
         tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME);
         tap(BTN_SEL); assert(br_sel_browse());
         tap(BTN_SEL); assert(br_sel_browse() && br_sel.loaded);              /* second tap loads */
-        tap(BTN_HOME); assert(br_sel_browse());                              /* loaded: KNOB BANK still steps categories */
-        tap(BTN_LFO); assert(br_ui.page == BR_PAGE_LFO);                     /* ...and any page button is the way out */
+        tap(BTN_HOME); assert(br_ui.page == BR_PAGE_HOME && !br_sel.active); /* loaded: KNOB BANK goes HOME */
+        tap(BTN_LFO); assert(br_ui.page == BR_PAGE_LFO);
         tap(BTN_SEL); tap(BTN_SEL); assert(br_sel.loaded);
         tap(BTN_SEL); assert(br_ui.page == BR_PAGE_HOME);                    /* loaded: PATCH goes HOME */
         tap(BTN_FX); assert(br_ui.page == BR_PAGE_FX);

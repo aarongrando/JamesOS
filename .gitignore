@@ -23,3 +23,22 @@ __pycache__/
 # macOS
 .DS_Store
 ._*
+
+# Public documentation is limited to the current release and component notices.
+*.md
+*.rst
+!/README.md
+/docs/*
+!/docs/BUILD.md
+!/docs/RELEASE-1.0b.md
+!/docs/legal/
+!/docs/legal/**
+!/docs/images/
+!/docs/images/**
+/.agents/
+/.codex/
+/.claude/
+/work/
+/output/
+/reports/
+/notes/

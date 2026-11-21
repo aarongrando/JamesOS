@@ -12,6 +12,7 @@ prefix = r'''
 #include <string.h>
 #define FM1_PATTERN_PANEL_TEST 1
 #define BR_PAGE_PS 10
+#define BR_DIAG_PANEL_BUTTONS 18u /* SMK-37 */
 struct { unsigned buttons,notes; } fm1_in;
 struct { unsigned page,previous_keys; } br_ui;
 struct { unsigned mode,action,slot,current,pending,cursor; char error[3],name[13]; } es;
@@ -32,7 +33,10 @@ int main(void) {
  br_ui.previous_keys=2;q[3]=6;q[4]=0;assert(run(q,6,r,&n)&&n==17&&r[12]==1&&r[13]==4&&r[14]==3&&r[15]==255&&r[16]==3);
  q[3]=5;q[4]=1;assert(run(q,6,r,&n)&&!br_pattern_diag_key);
  br_ui.previous_keys=0;q[3]=4;q[4]=0;assert(!run(q,6,r,&n));
- q[4]=1;fm1_in.notes=1;assert(!run(q,6,r,&n));fm1_in.notes=0;es.mode=1;assert(!run(q,6,r,&n));
+ q[4]=1;fm1_in.notes=1;assert(!run(q,6,r,&n));fm1_in.notes=0; q[3]=1;q[4]=15;assert(run(q,6,r,&n)&&br_project_diag_down==(1u<<15));br_project_diag_down=0;
+ q[3]=2;assert(run(q,6,r,&n)&&br_project_diag_up==(1u<<15));br_project_diag_up=0;
+ q[3]=1;q[4]=18;assert(!run(q,6,r,&n)&&!br_project_diag_down);
+ q[3]=4;q[4]=1;es.mode=1;assert(!run(q,6,r,&n));
  return 0;
 }
 '''

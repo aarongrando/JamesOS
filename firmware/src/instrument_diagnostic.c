@@ -15,6 +15,12 @@ static int (*volatile br_size_cancel)(pdg_gate *,const uint8_t *)=pdg_cancel;
 #include "midi_clock_diag.h"
 #include "instrument_pipeline_policy.h"
 #include "instrument_failure_job_profile.h"
+/* Panel buttons the 0x9D synthetic-edge diagnostic may press (see there). */
+#if BR_PRODUCT_SMK37
+#define BR_DIAG_PANEL_BUTTONS 18u
+#else
+#define BR_DIAG_PANEL_BUTTONS 14u
+#endif
 #include "instrument_worker_diag87.h"
 #ifndef FM1_DEVELOPMENT_DIAGNOSTICS
 #define FM1_DEVELOPMENT_DIAGNOSTICS 1
@@ -1781,6 +1787,8 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
         irq_restore(irq);
 #endif
         *reply_n = 16u;
+#endif
+#if FM1_DIAG_PANEL_EDGES
     } else if (cmd == 0x9Du && (!n || (n == 6u && body &&
                body[0]=='B' && body[1]=='R' && body[2]==1u))) {
 #if defined(FM1_DEVICE)
@@ -1799,8 +1807,10 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
                     (br_ui.previous_keys & br_pattern_diag_key)) br_pattern_diag_key=0u;
             else
 #endif
-            if(kind==1u && id<14u && value==0u)br_project_diag_down=1u<<id;
-            else if(kind==2u && id<14u && value==0u)br_project_diag_up=1u<<id;
+            /* The 14 shared panel buttons; the SMK-37 adds LEFT, RIGHT, FADER BANK and
+             * NOTE REPEAT (14..17, hal/smk37/smk37_input.h), read from the same edges. */
+            if(kind==1u && id<BR_DIAG_PANEL_BUTTONS && value==0u)br_project_diag_down=1u<<id;
+            else if(kind==2u && id<BR_DIAG_PANEL_BUTTONS && value==0u)br_project_diag_up=1u<<id;
             else if(kind==3u && id<2u && value<=32u && es.mode) {
                 if(id==0u)br_project_diag_knob1=(int32_t)value-16;
                 else br_project_diag_knob2=(int32_t)value-16;
@@ -1825,6 +1835,8 @@ static int fm1_app_command(uint32_t cmd, const uint8_t *body, uint32_t n,
 #else
         return 0;
 #endif
+#endif
+#if FM1_DEVELOPMENT_DIAGNOSTICS
     } else if (cmd == 0x9Eu && (!n || (n == 6u && body &&
                body[0] == 'B' && body[1] == 'R' && body[2] == 1u))) {
 #if defined(FM1_DEVICE)

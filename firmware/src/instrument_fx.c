@@ -781,8 +781,9 @@ static uint32_t br_master_saturation_mix_gain_q15;
 static uint32_t br_master_wow_mix_gain_q15;
 static uint32_t br_master_bit_mix_gain_q15;
 #endif
-/* Opt-in diagnostic schedule mode. Zero preserves the production concurrent path. */
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+/* Opt-in diagnostic schedule mode. Zero preserves the production concurrent path.
+ * Left out where RAM code is lean; the command then reports it off. */
+#if BR_FX_DEV_RAM_STATS
 static volatile uint32_t br_fx_serial_mode;
 #else
 #define br_fx_serial_mode 0u
@@ -869,7 +870,8 @@ volatile uint32_t br_gr_stats[8];
 #else
 static volatile uint32_t br_gr_stats[8];
 #endif
-#else
+#endif
+#if !BR_FX_DEV_RAM_STATS
 /* The scheduler consumes the last measured job time; keep it independent of
  * the diagnostic counters and peak tracking. */
 static volatile uint32_t br_gr_cost_ticks;
@@ -4946,7 +4948,7 @@ static BR_FX_PREPARE_CODE __attribute__((noinline)) void br_gr_block(uint32_t n)
             wet_r[i] = wet_r[i] * g / (int32_t)n;
         }
     }
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
     for (i = 0u; i < n; ++i) {
         uint32_t a = (uint32_t)(wet_l[i] < 0 ? -wet_l[i] : wet_l[i]);
         if (a > br_gr_stats[4]) br_gr_stats[4] = a;
@@ -4965,14 +4967,14 @@ static BR_FX_RAM_AUDIO __attribute__((noinline)) void br_gr_job(uint32_t n)
     if (!br_gr_run) return;
     /* Never run on undesigned coefficients. */
     if (!br_gr_key_valid || !br_gr_rv.configured) {
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
         ++br_gr_stats[1];
 #endif
         return;
     }
     BR_FX_PREPARE_INVOKE(br_gr_block, n);
     br_gr_out_seq = br_fx_block_seq;
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
     ++br_gr_stats[0];
     br_gr_stats[5] = br_gr_key[0]; br_gr_stats[6] = br_gr_key[1]; br_gr_stats[7] = br_gr_key[2];
 #endif
@@ -4981,7 +4983,7 @@ static BR_FX_RAM_AUDIO __attribute__((noinline)) void br_gr_job(uint32_t n)
     { uint32_t trace_lap = started; BR_IDLE_LAP(BR_TS_ACC_GRJOB, trace_lap); }
 #endif
     started = fm1_ticks() - started;
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
     br_fx_gr_work_ticks += started;
     br_gr_stats[2] = started;
     if (started > br_gr_stats[3]) br_gr_stats[3] = started;
@@ -5557,7 +5559,8 @@ BR_AUDIO_API __attribute__((minsize, noinline)) void br_fx_init(void)
     br_gr_out_seq = br_fx_block_seq - 1u;
 #if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
     memset((void *)br_gr_stats, 0, sizeof br_gr_stats);
-#else
+#endif
+#if !BR_FX_DEV_RAM_STATS
     br_gr_cost_ticks = 0u;
 #endif
 #endif
@@ -5917,7 +5920,7 @@ BR_FX_RAM_AUDIO uint32_t br_fx_fusion_cost(uint32_t p)
 uint32_t br_fx_shared_reverb_runs(void) { return br_gr_run && br_gr_key_valid; }
 void br_fx_shared_reverb_separate(void) { br_gr_separate_seq = br_fx_block_seq; }
 uint32_t br_fx_shared_reverb_cost(void) {
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
     return br_gr_stats[2];
 #else
     return br_gr_cost_ticks;
@@ -6175,11 +6178,11 @@ BR_FX_RAM_AUDIO BR_AUDIO_API uint32_t br_fx_worker_track_batch(void *opaque_batc
 #else
             if (master_active) {
 #endif
-#if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
+#if defined(FM1_DEVICE) && BR_FX_DEV_RAM_STATS
                 uint32_t master_started = fm1_ticks();
 #endif
                 br_master_fx_process_range(br_fx_finish_stream_job.out, base, end);
-#if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
+#if defined(FM1_DEVICE) && BR_FX_DEV_RAM_STATS
                 br_fx_master_work_ticks += fm1_ticks() - master_started;
 #endif
             }
@@ -7143,7 +7146,11 @@ uint32_t br_fx_process_pipeline_reverse_finish(int32_t *out, uint32_t n,
 #if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
 BR_AUDIO_API void br_fx_set_serial_mode(uint32_t enabled)
 {
+#if BR_FX_DEV_RAM_STATS
     br_fx_serial_mode = enabled ? 1u : 0u;
+#else
+    (void)enabled;
+#endif
 }
 
 BR_AUDIO_API uint32_t br_fx_serial_mode_get(void)

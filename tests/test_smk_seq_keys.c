@@ -35,10 +35,6 @@ int main(void)
     assert(br_ui.sustain_note[37] == 128u);
     br_smk_pedal_set(0u);
     assert(!br_ui.sustain_note[37]);
-    br_ui.page = BR_PAGE_SCALE; br_ui.part = 0u;
-    br_sel.cursor[0] = 0u; br_smk_next_sound_category();
-    assert(br_sel.cursor[0] == 32u && br_sel.active);
-    br_sel_close();
     br_smk_pedal_set(1u); br_hold_on = 1u;
     br_smk_seq_keys(&held, 1u, 1u, 1u, velocity);
     br_smk_seq_keys(&held, 0u, 0u, 1u, velocity);
@@ -46,5 +42,21 @@ int main(void)
     assert(br_ui.sustain_note[37]);
     br_smk_pedal_set(0u);
     assert(!br_ui.sustain_note[37]);
+
+    /* A key pressed while a tonal step pad is held sets that step's pitch (FM-1 A10). */
+    br_ui.octave = 0;
+    br_step_trigger_toggle(0u, 3u, 0u, 0u, 0u);
+    assert(br_step_active(0u, 3u, 0u, 0u));
+    br_ui.step_press_key = 40u; br_ui.step_press_part = 0u; br_ui.step_press_step = 3u;
+    br_ui.step_press_lane = 0u; br_ui.step_press_kit = 0u; br_ui.step_edit_active = 0u;
+    br_smk_step_pitch_key(4u);
+    assert(br_step_note_get(0u, 3u, 0u) == 57u && br_ui.step_edit_active);
+    br_ui.step_press_kit = 1u; br_smk_step_pitch_key(6u);            /* kit steps ignore it */
+    assert(br_step_note_get(0u, 3u, 0u) == 57u);
+    br_ui.step_press_kit = 0u; br_ui.step_press_step = 4u; br_ui.step_edit_active = 0u;
+    br_smk_step_pitch_key(6u);                                        /* empty steps ignore it */
+    assert(!br_step_active(0u, 4u, 0u, 0u) && !br_ui.step_edit_active);
+    br_ui.step_press_key = BR_STEP_NO_PRESS; br_smk_step_pitch_key(6u); /* nothing held */
+    assert(br_step_note_get(0u, 3u, 0u) == 57u);
     return 0;
 }

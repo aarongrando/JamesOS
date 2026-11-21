@@ -396,7 +396,16 @@ static __attribute__((noinline)) void br_midi_played(uint8_t status, uint8_t d1,
 #if defined(BR_UI_CLOCK_SUPPORT)
 #include "pattern_ui_clock_service.h"
 #endif
-#if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
+/* Synthetic panel edges (diagnostic 0x9D). On in development builds; a distribution
+ * test build may opt in with -DFM1_DIAG_PANEL_EDGES=1. Releases leave it out. */
+#ifndef FM1_DIAG_PANEL_EDGES
+#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#define FM1_DIAG_PANEL_EDGES 1
+#else
+#define FM1_DIAG_PANEL_EDGES 0
+#endif
+#endif
+#if defined(FM1_DEVICE) && FM1_DIAG_PANEL_EDGES
 static uint32_t br_project_diag_down,br_project_diag_up;
 static int32_t br_project_diag_knob1,br_project_diag_knob2;
 #endif
@@ -1680,7 +1689,7 @@ static void br_app_tick_inner(void)
         buttons &= ~br_poly_deferred_buttons;
     }
 #endif
-#if defined(FM1_DEVICE) && (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS)
+#if defined(FM1_DEVICE) && FM1_DIAG_PANEL_EDGES
     buttons|=br_project_diag_down;released|=br_project_diag_up;
     br_project_diag_down=br_project_diag_up=0;
 #endif

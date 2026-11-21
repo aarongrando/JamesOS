@@ -59,6 +59,12 @@ uint32_t plaits_quiet(const void *state);
 /* The voice's release window (polyphonic voices): today's long window, not the warm-keep table. */
 void plaits_skip_frames(void* state, uint32_t n);
 uint32_t plaits_quiet_long(const void *state);
+/* Plaits models 2-4 (six-operator FM) shape the sound with their own envelopes, which play their release as soon
+ * as the Plaits gate drops. Their gate stays up until the track's amp envelope has finished, so the envelope's
+ * RELEASE sets the tail; the engine holds its sustain meanwhile. */
+#ifndef BR_PLAITS_GATE_FOLLOWS_ENV
+#define BR_PLAITS_GATE_FOLLOWS_ENV(model) ((uint32_t)(model) - 2u <= 2u)
+#endif
 /* Read-only predispatch cost-class query; does not mutate the voice. */
 int32_t plaits_active_engine(const void *state);
 /* Writes all n frames. Larger requests are split into FIFO-safe chunks. */

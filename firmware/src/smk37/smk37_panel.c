@@ -225,6 +225,9 @@ static void br_smk_controls(uint32_t buttons, uint32_t released, uint32_t *keys,
         int kit = br_is_kit(br_part[p].sound.preset);
         br_smk_seq_keys(&seq_key_held, *keys, *edges, br_seq_grid_page() && !kit,
                         fm1_in.key_vel + SMK_KEY_F3);
+        if (br_step_press_pending() && !kit && br_seq_grid_page())
+            for (uint32_t k = 0; k < 27u; ++k)
+                if (*edges & (1u << k)) br_smk_step_pitch_key(k);
         if (!br_step_press_pending() && !br_retrig_editing()) {
             for (uint32_t k = 0; k < 27u; ++k) {
                 if (!(*edges & (1u << k))) continue;

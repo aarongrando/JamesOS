@@ -1291,18 +1291,6 @@ static void br_sel_move(int32_t turn)
     }
     br_sel_show_now();
 }
-#if BR_PRODUCT_SMK37
-static void br_smk_next_sound_category(void)
-{
-    uint32_t p = br_ui.part, start = br_sel.cursor[p], next = start;
-    const char *category = br_bank_category(start);
-    if (p >= BR_SYNTH_PARTS) return;
-    do { next = (next + 1u) % BR_BANK_COUNT; }
-    while (next != start && br_bank_category(next) == category);
-    br_sel_move((int32_t)next - (int32_t)start);
-    br_message(br_bank_category(next));
-}
-#endif
 static void br_sel_close(void)
 {
     uint32_t p = br_sel.part;
@@ -1839,9 +1827,13 @@ static void br_buttons(uint32_t buttons)
         switch (b) {
         case BTN_HOME:
 #if BR_PRODUCT_SMK37
-            /* KNOB BANK: on the synth SOUNDS list it steps to the next category; elsewhere it is HOME. */
-            if (br_sel_browse() && br_ui.part < BR_SYNTH_PARTS) br_smk_next_sound_category();
-            else
+            /* KNOB BANK returns to HOME from every page and menu. On HOME it flips
+             * between the two sound pages. The deep menu's first page steps to its
+             * second, which only KNOB BANK reaches; the second returns to HOME. */
+            if (br_ui.page == BR_PAGE_HOME && br_ui.screen[BR_PAGE_HOME] >= 3u) {
+                br_smk_retrig.opened = 0u;
+                br_ui.screen[BR_PAGE_HOME] = 0u; br_ui.edit_key = 0xFFFFFFFFu; br_ui.redraw = 1u;
+            } else
 #endif
             br_open_module(BR_PAGE_HOME);
             break;
@@ -2850,6 +2842,20 @@ static void br_smk_seq_keys(uint32_t *previous, uint32_t held, uint32_t edges,
         }
     }
     *previous = active ? held : 0u;
+}
+
+/* A keybed key pressed while a tonal step pad is held sets that step's pitch, as a second key does
+ * on the FM-1 (A10). The key itself sounds through the keybed path; the hold becomes an edit, so
+ * releasing the pad keeps the step. Empty steps and kit steps ignore it. */
+static void br_smk_step_pitch_key(uint32_t key)
+{
+    uint32_t p = br_ui.step_press_part, step = br_ui.step_press_step;
+    if (!br_step_press_pending() || br_ui.step_press_kit || !br_step_active(p, step, 0u, 0u)) return;
+    br_ui.step_edit_active = 1u;
+    br_part[p].revision++;
+    br_step_note_set(p, step, 0u, (uint32_t)br_clip(53 + (int32_t)key + 12 * br_ui.octave, 0, 127));
+    RING_PUBLISH(); br_part[p].revision++;
+    br_ui.redraw = 1u;
 }
 #endif
 static void br_key_down(uint32_t key, int held)
@@ -6577,7 +6583,8 @@ static void br_draw_page_route_badge(uint32_t force, uint32_t part)
     }
 #endif
     uint32_t hash = (((bit + part * 7u) * 131u + br_ui.page) * 31u + screen) ^ br_badge_pulse_key(part, bits);
-    hash = (((hash * 5u + punch) * 2u + override) * 2u + scope) * 17u + home_voices;
+    uint32_t arp_badge = br_ui.page == BR_PAGE_PATTERN && !br_retrig_page() && br_arp_on;
+    hash = ((((hash * 5u + punch) * 2u + override) * 2u + scope) * 17u + home_voices) * 2u + arp_badge;
     if (br_ui.page == BR_PAGE_MIX && screen == 2u)
         hash = ((hash * 2u + br_midi_clock_enabled) * 2u + br_midi_clock_active) * 257u + br_midi_clock_bpm;
     if (br_retrig_page()) hash = ((hash * 67u + br_ui.cursor) * 5u + br_ui.lane) * 2u + br_retrig_editing();
@@ -6593,6 +6600,7 @@ static void br_draw_page_route_badge(uint32_t force, uint32_t part)
         }
         br_draw_page_badge(label, br_track_color(part));
     }
+    if (arp_badge) br_draw_page_badge("ARP: ON", br_track_color(part));
     if (br_ui.page == BR_PAGE_LFO && screen == BR_LFOS) br_draw_page_badge("GLOBAL LFO", BR_GLOBAL_ACC);
     if (override) br_draw_page_badge("PATCH OVERRIDE", BR_GLOBAL_ACC);
     if (bits) {

@@ -127,21 +127,39 @@ BR_COLD_SIZE static inline uint8_t br_poly_source_on(br_poly_source_t *s, uint8_
     return voice;
 }
 
-BR_COLD_SIZE static inline uint8_t br_poly_source_off(br_poly_source_t *s, uint8_t note, uint32_t generation)
+/* hold_gate: keep the Plaits gate up (BR_PLAITS_GATE_FOLLOWS_ENV); the caller drops it later. */
+BR_COLD_SIZE static inline uint8_t br_poly_source_off_hold(br_poly_source_t *s, uint8_t note, uint32_t generation,
+        uint32_t hold_gate)
 {
     uint8_t voice = br_poly_note_off(&s->allocator, note, generation);
-    if (voice != BR_POLY_NO_VOICE) plaits_note_off(s->storage.voice[voice], 128u);
+    if (voice != BR_POLY_NO_VOICE && !(hold_gate && BR_PLAITS_GATE_FOLLOWS_ENV(br_poly_source_voice_model(s, voice))))
+        plaits_note_off(s->storage.voice[voice], 128u);
     return voice;
+}
+
+BR_COLD_SIZE static inline uint8_t br_poly_source_off(br_poly_source_t *s, uint8_t note, uint32_t generation)
+{
+    return br_poly_source_off_hold(s, note, generation, 0u);
+}
+
+/* enveloped: the voice's amp envelope is still on, so it renders whatever the quiet window says (a release longer
+ * than the window is heard to its end). */
+static inline void br_poly_source_render_env(br_poly_source_t *s, uint8_t voice, uint32_t enveloped,
+        int32_t pitch, uint16_t timbre, uint16_t morph, uint16_t harmonics,
+        uint16_t aux, int16_t *out, uint32_t n)
+{
+    if (voice >= s->allocator.limit || !s->storage.voice[voice] ||
+        (!enveloped && plaits_quiet_long(s->storage.voice[voice]))) {
+        memset(out, 0, n * sizeof(*out));
+        return;
+    }
+    plaits_render(s->storage.voice[voice], br_poly_source_voice_model(s, voice), pitch, timbre, morph, harmonics, aux, out, n);
 }
 
 static inline void br_poly_source_render(br_poly_source_t *s, uint8_t voice,
         int32_t pitch, uint16_t timbre, uint16_t morph, uint16_t harmonics,
         uint16_t aux, int16_t *out, uint32_t n)
 {
-    if (voice >= s->allocator.limit || !s->storage.voice[voice] || plaits_quiet_long(s->storage.voice[voice])) {
-        memset(out, 0, n * sizeof(*out));
-        return;
-    }
-    plaits_render(s->storage.voice[voice], br_poly_source_voice_model(s, voice), pitch, timbre, morph, harmonics, aux, out, n);
+    br_poly_source_render_env(s, voice, 0u, pitch, timbre, morph, harmonics, aux, out, n);
 }
 #endif

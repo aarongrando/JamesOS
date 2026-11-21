@@ -3,6 +3,23 @@
 #include <stdint.h>
 #include "../hal/fm1_fault_diag.h"
 
+/* SMK-37 device builds keep their RAM code inside the region: development
+ * diagnostics there leave out the FX progress stores, the shared-reverb
+ * counters and the master work timer, all of which sit in RAM audio code.
+ * Their readers report zero (progress zero means unknown). */
+#ifndef BR_DIAG_RAM_LEAN
+#if defined(FM1_DEVICE) && defined(BR_PRODUCT_SMK37) && BR_PRODUCT_SMK37
+#define BR_DIAG_RAM_LEAN 1
+#else
+#define BR_DIAG_RAM_LEAN 0
+#endif
+#endif
+#if (!defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS) && !BR_DIAG_RAM_LEAN
+#define BR_FX_DEV_RAM_STATS 1
+#else
+#define BR_FX_DEV_RAM_STATS 0
+#endif
+
 /* FX progress is a diagnostic cursor, not a synchronization primitive.
  * Layout: stage[14:7], sample[6:2], part[1:0]; zero means unknown. */
 enum {
@@ -45,7 +62,7 @@ br_fx_progress_stage(uint32_t tag)
 }
 
 /* One aligned volatile store followed by a compiler-only ordering barrier. */
-#if !defined(FM1_DEVELOPMENT_DIAGNOSTICS) || FM1_DEVELOPMENT_DIAGNOSTICS
+#if BR_FX_DEV_RAM_STATS
 static inline __attribute__((always_inline)) void
 br_fx_progress_store_force(volatile uint32_t tags[2], uint32_t core,
                            uint32_t part, uint32_t sample, uint32_t stage)

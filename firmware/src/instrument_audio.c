@@ -1340,6 +1340,11 @@ typedef struct {
 } br_env_t;
 
 #define BR_ENV_VELOCITY_RAMP_SAMPLES 32u
+#if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
+/* A released note of a BR_PLAITS_GATE_FOLLOWS_ENV model whose Plaits gate is still up (dropped when the amp
+ * envelope is off). Written by the note handlers, read and cleared by the track's render between them. */
+static uint8_t br_plaits_gate_hold[BR_PARTS];
+#endif
 
 #if defined(__ELF__)
 static br_dsp_state_t br_dsp[BR_PARTS] __attribute__((section(".pool"), aligned(8)));
@@ -1405,6 +1410,12 @@ static void br_model_mono_limit(void)
 }
 #endif
 static br_env_t br_env[BR_PARTS];
+#if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
+/* A track waiting to enter polyphony fades its own release tail quickly.
+ * Polyphony reuses the mono voice's memory, so it waits for that envelope. */
+#define BR_POLY_TAIL_CUT_SAMPLES ((10u * FM1_AUDIO_RATE_HZ + 500u) / 1000u)
+static volatile uint8_t br_poly_tail_cut_part = 255u;
+#endif
 static br_glide_t br_mono_glide[BR_SYNTH_PARTS];
 static int32_t br_mono_lpg[BR_SYNTH_PARTS];
 static br_filter_t br_filter[BR_PARTS];
@@ -2487,6 +2498,7 @@ BR_POLY_COLD static void br_start_note_now(uint32_t p, uint32_t note, uint32_t v
     pitch = (br_glide_pitch(&br_mono_glide[p]) + 32768) >> 16;
 #if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
     if (br_is_plaits(s->preset)) {
+        br_plaits_gate_hold[p] = 0u;
         plaits_note_on(br_dsp[p].plaits, s->preset - BR_FIRST_PLAITS,
             (uint32_t)pitch,
             (uint16_t)(br_scale_7bit_q15_exact(br_bound(s->timbre, 127u))),
@@ -2705,7 +2717,10 @@ BR_POLY_COLD static void br_release_note(uint32_t p, uint32_t note)
     if (br_is_plaits(br_cached_sound[p].preset)) {
         if (note >= 128u || note == br_env[p].note) {
             /* Raw MIDI identity is checked here, before pitch mapping. */
-            plaits_note_off(br_dsp[p].plaits, 128u);
+            if (BR_PLAITS_GATE_FOLLOWS_ENV(br_cached_sound[p].preset - BR_FIRST_PLAITS) &&
+                br_env[p].stage != BR_ENV_OFF && br_env[p].stage != BR_ENV_RELEASE)
+                br_plaits_gate_hold[p] = 1u;
+            else plaits_note_off(br_dsp[p].plaits, 128u);
             br_mod_note_off(&br_mod_state[p]);
             if (br_env[p].stage != BR_ENV_OFF && br_env[p].stage != BR_ENV_RELEASE) {
                 br_env[p].stage = BR_ENV_RELEASE;
@@ -2806,6 +2821,7 @@ BR_POLY_COLD static void br_stop_part(uint32_t p)
 #if defined(BR_ENABLE_PLAITS) && BR_ENABLE_PLAITS
     else if (br_mode[p] == 3u) {
         plaits_all_off(br_dsp[p].plaits);
+        br_plaits_gate_hold[p] = 0u;
         if (br_env[p].stage != BR_ENV_OFF) {
             br_env[p].stage = BR_ENV_RELEASE;
             br_env[p].release_start = br_env[p].amp;
@@ -4172,8 +4188,53 @@ static uint32_t br_poly_model_mod_active(const br_mod_config_t *m)
     return 0u;
 }
 #endif
-static uint32_t br_poly_mix_gain_q15;
-#define BR_POLY_MIX_CEILING 24576u   /* the master limiter knee (instrument_fx.c BR_MASTER_LIMIT_KNEE) */
+static uint32_t br_poly_mix_gain_q15, br_poly_filter_gain_q15 = 32768u;
+/* The next block-end gain toward peak <= ceiling: falls at once, recovers 1/64 of the way per block. */
+static inline uint32_t br_poly_gain_next(uint32_t from, uint32_t peak, uint32_t ceiling)
+{
+    uint32_t target = peak > ceiling ? (uint32_t)(((uint64_t)ceiling << 15) / peak) : 32768u;
+    if (target < from) return target;
+    if (target > from) { uint32_t step = (target - from) / 64u; return from + (step ? step : 1u); }
+    return from;
+}
+/* Polyphonic chords sum the way an analog poly's mixer does: with headroom,
+ * soft-limited late. Single notes are never touched. How far a chord may rise
+ * depends on what follows the sum (br_poly_scheduler_post):
+ *  - chorus (MOD) on: its line stores plain int16, so the chord peaks at 40960
+ *    and the narrow knee below brings it to 32767;
+ *  - otherwise: up to 131072, and the wide knee brings that to 98304 (3x full
+ *    scale). The track's 32-bit path carries it; the delay's write saturator,
+ *    drive and the master limiter all handle it smoothly. With the filter in
+ *    use, a chord above the ladder's saturation point (53510) is lowered into
+ *    it and restored after it, so the shared filter stays as clean as it is
+ *    for one loud note. */
+#define BR_POLY_MIX_KNEE 24576u      /* linear below, as the master limiter's knee (instrument_fx.c) */
+#define BR_POLY_MIX_CEILING 40960u   /* chorus on: chords peak here; the knee bends it to 32767 */
+#define BR_POLY_FILTER_CEILING 53510u /* BR_FILTER_LADDER_SAT_SCALE: the ladder bends it from here */
+#define BR_POLY_WIDE_KNEE 65536u
+#define BR_POLY_WIDE_CEILING 131072u /* no filter, no chorus: the wide knee brings it to 98304 */
+/* The master's soft knee: linear to 24576, then quadratic with zero slope at
+ * 40960 -> 32767. No corner and no clip. */
+static inline int32_t br_poly_soft_knee(int32_t x)
+{
+    uint32_t a = x < 0 ? 0u - (uint32_t)x : (uint32_t)x;
+    if (a <= BR_POLY_MIX_KNEE) return x;
+    if (a > BR_POLY_MIX_CEILING) a = BR_POLY_MIX_CEILING;
+    uint32_t d = a - BR_POLY_MIX_KNEE;
+    int32_t y = (int32_t)(BR_POLY_MIX_KNEE + d - ((d * d) >> 15));
+    if (y > 32767) y = 32767;
+    return x < 0 ? -y : y;
+}
+/* The same curve scaled up: linear to 65536, quadratic with zero slope at 131072 -> 98304. */
+static inline int32_t br_poly_wide_knee(int32_t x)
+{
+    uint32_t a = x < 0 ? 0u - (uint32_t)x : (uint32_t)x;
+    if (a <= BR_POLY_WIDE_KNEE) return x;
+    if (a > BR_POLY_WIDE_CEILING) a = BR_POLY_WIDE_CEILING;
+    uint32_t d = a - BR_POLY_WIDE_KNEE;
+    int32_t y = (int32_t)(BR_POLY_WIDE_KNEE + d - (uint32_t)(((uint64_t)d * d) >> 17));
+    return x < 0 ? -y : y;
+}
 #define BR_POLY_STANDARD_GRAPH (!br_poly_scheduler_enabled)
 BR_COLD_SIZE static uint32_t br_poly_scheduler_is_enabled(void) { return br_poly_scheduler_enabled; }
 BR_COLD_SIZE static uint32_t br_poly_scheduler_deferred_pending(void)
@@ -4194,6 +4255,14 @@ BR_COLD_SIZE static uint32_t br_poly_scheduler_sources_releasable(uint32_t selec
     for (uint32_t p = 0; p < BR_SYNTH_PARTS; ++p)
         if (br_live_count[p]) return 0u;
     return selected < BR_SYNTH_PARTS && br_env[selected].stage == BR_ENV_OFF;
+}
+/* Only the selected track's own release tail is left. */
+BR_COLD_SIZE static uint32_t br_poly_scheduler_tail_only(uint32_t selected)
+{
+    if (br_event_read != br_event_write || br_panic_parts || br_midi_transport_overflow) return 0u;
+    for (uint32_t p = 0; p < BR_SYNTH_PARTS; ++p)
+        if (br_live_count[p]) return 0u;
+    return selected < BR_SYNTH_PARTS && br_env[selected].stage == BR_ENV_RELEASE;
 }
 BR_COLD_SIZE static uint32_t br_poly_scheduler_amp(uint32_t part, uint32_t fallback)
 {
@@ -4312,7 +4381,7 @@ BR_POLY_COLD static int br_poly_scheduler_enter(uint32_t part, int workers_parke
 #if BR_ADAPTIVE_POLY
     br_poly_sweep_capable = (uint8_t)sweep;
 #endif
-    br_poly_mix_gain_q15 = 32768u;
+    br_poly_mix_gain_q15 = 32768u; br_poly_filter_gain_q15 = 32768u;
     br_poly_scheduler_enabled = 1u;
 #if BR_MODEL_MOD_EXPERIMENT
     br_model_poly_interval = 0u; br_model_poly_voice = BR_SWEEP_NONE; br_model_poly_prepared = 0u;
@@ -4362,6 +4431,7 @@ BR_POLY_COLD BR_AUDIO_API uint32_t br_poly_transition_needed(uint32_t part, uint
 #if defined(FM1_DEVICE) && defined(BR_CPU1_AUDIO)
     if (fm1_cpu1_worker_fault) return br_poly_scheduler_enabled ? 2u : 0u;
 #endif
+    br_poly_tail_cut_part = 255u;
     if (part >= BR_SYNTH_PARTS || br_part[part].sound.voice_mode == 1u ||
         (br_part[part].sound.voice_mode == 0u && br_poly_user_off))
         return br_poly_scheduler_enabled ? 2u : 0u;
@@ -4380,8 +4450,12 @@ BR_POLY_COLD BR_AUDIO_API uint32_t br_poly_transition_needed(uint32_t part, uint
     if (suspend || br_playing || br_transport_prev || br_punch_effect || br_arp_on ||
         br_pipeline_mode ||
         part >= BR_SYNTH_PARTS || !br_audio_source_fx_fusion ||
-        !br_poly_scheduler_sources_releasable(part) || br_poly_scheduler_events.count || br_poly_scheduler_deferred_pending() ||
+        br_poly_scheduler_events.count || br_poly_scheduler_deferred_pending() ||
         !br_is_plaits(br_part[part].sound.preset)) return 0u;
+    if (!br_poly_scheduler_sources_releasable(part)) {
+        if (br_poly_scheduler_tail_only(part)) br_poly_tail_cut_part = (uint8_t)part;
+        return 0u;
+    }
     uint32_t model = br_part[part].sound.preset - BR_FIRST_PLAITS;
 #if BR_ADAPTIVE_POLY
     uint32_t sweep = br_poly_model_mod_active(&br_cached_mod[part]);
@@ -4584,7 +4658,7 @@ static int32_t br_poly_scheduler_post(uint32_t part, int32_t *row, uint32_t n)
 {
     br_sound_t *sound = &br_effective_sound[part];
     uint32_t newest = 0u, active = 0u;
-    int32_t sum = 0; /* bounded by BR_BLOCK * 32767 */
+    int32_t sum = 0; /* bounded by BR_BLOCK * 98304 */
     uint32_t peak = 0u;
     /* Only admitted slots own voices. Avoid checking the unused slots on
      * every block, especially for the lowest-capacity models. */
@@ -4599,34 +4673,53 @@ static int32_t br_poly_scheduler_post(uint32_t part, int32_t *row, uint32_t n)
         uint32_t magnitude = row[i] < 0 ? 0u - (uint32_t)row[i] : (uint32_t)row[i];
         if (magnitude > peak) peak = magnitude;
     }
-    /* Mix gain: the chord is scaled to peak at the master limiter's knee (BR_POLY_MIX_CEILING), so the
-     * limiter stays linear on chords. The gain ramps across the block from the previous block's value
-     * (a step at the block edge clicks), falls to the new target within the block and recovers by 1/64 of
-     * the distance per block (about 370 ms). */
-    uint32_t from = br_poly_mix_gain_q15, to = from;
-    uint32_t target = peak > BR_POLY_MIX_CEILING ? (BR_POLY_MIX_CEILING * 32768u) / peak : 32768u;
-    if (target < from) to = target;
-    else if (target > from) {
-        uint32_t step = (target - from) / 64u;
-        to = from + (step ? step : 1u);
-    }
-    br_poly_mix_gain_q15 = to;
-    int32_t gain_acc = (int32_t)(from << 8);
+    /* Two gains, each ramped across the block from the previous block's value (a step at the block edge
+     * clicks), falling to a new target within the block and recovering by 1/64 of the distance per block
+     * (about 370 ms):
+     *  - the level guard keeps the chord under its path's ceiling (above);
+     *  - the filter wrap, with the filter in use, lowers the filter's input to its saturation point and
+     *    restores the level sample by sample after it, so a chord is filtered as cleanly as one loud note
+     *    (each voice of an analog poly has its own filter). Notes under that point pass untouched. */
+    uint32_t filter = br_bound(sound->filter, 127u);
+    uint32_t chorus = br_cached_fx[part].mod_mix || br_send_now[part][2];
+    uint32_t filtered = sound->filter_keytrack || (filter != 63u && filter != 64u) || br_filter[part].mix;
+    uint32_t ceiling = chorus ? BR_POLY_MIX_CEILING : BR_POLY_WIDE_CEILING;
+    uint32_t from = br_poly_mix_gain_q15, to = br_poly_gain_next(from, peak, ceiling);
+    uint32_t guarded = (uint32_t)(((uint64_t)peak * (from < to ? to : from)) >> 15);
+    uint32_t wrap_from = br_poly_filter_gain_q15, wrap_to = filtered ?
+        br_poly_gain_next(wrap_from, guarded, BR_POLY_FILTER_CEILING) : 32768u;
+    uint16_t wrap[BR_BLOCK];
+    uint32_t wrapped = filtered && (wrap_from != 32768u || wrap_to != 32768u);
+    br_poly_mix_gain_q15 = to; br_poly_filter_gain_q15 = wrap_to;
+    int32_t gain_acc = (int32_t)(from << 8), wrap_acc = (int32_t)(wrap_from << 8);
     int32_t gain_step = n ? (((int32_t)to - (int32_t)from) * 256) / (int32_t)n : 0;
+    int32_t wrap_step = n ? (((int32_t)wrap_to - (int32_t)wrap_from) * 256) / (int32_t)n : 0;
     /* The filter's controls are constant over the block: scale and sum the input, then filter the row in one call
      * (bit-identical to calling the per-sample filter inside the loop). */
     for (uint32_t i = 0; i < n; ++i) {
         gain_acc += gain_step;
         uint32_t g = i + 1u == n ? to : (uint32_t)(gain_acc >> 8);
-        int32_t sample = br_clip(br_filter_mul_q15(row[i], g), -32767, 32767);
+        int32_t sample = br_filter_mul_q15(row[i], g);
         sum += sample;
+        if (wrapped) {
+            wrap_acc += wrap_step;
+            uint32_t w = i + 1u == n ? wrap_to : (uint32_t)(wrap_acc >> 8);
+            if (!w) w = 1u;
+            wrap[i] = (uint16_t)(w > 32767u ? 32767u : w);
+            if (w < 32768u) sample = br_filter_mul_q15(sample, w);
+        }
         row[i] = sample;
     }
     if (!sound->filter_resonance && !sound->filter_keytrack)
-        br_filter_block(&br_filter[part], row, n, br_bound(sound->filter, 127u), 0u);
+        br_filter_block(&br_filter[part], row, n, filter, 0u);
     else br_filter_block_controls(&br_filter[part], row, n,
-            br_bound(sound->filter, 127u), br_bound(sound->filter_resonance, 127u),
+            filter, br_bound(sound->filter_resonance, 127u),
             sound->filter_keytrack, br_poly_scheduler.envelope[newest].note);
+    for (uint32_t i = 0; i < n; ++i) {
+        int32_t sample = row[i];
+        if (wrapped && wrap[i] < 32767u) sample = (int32_t)((float)sample * (32768.0f / (float)wrap[i]));
+        row[i] = chorus ? br_poly_soft_knee(sample) : br_poly_wide_knee(sample);
+    }
     br_quiet_part[part] = !active && br_filter_quiet(&br_filter[part]);
     return n ? (int32_t)(sum / n) : 0;
 }
@@ -4846,6 +4939,10 @@ static void br_engine_source_part(uint32_t p, int32_t *output,
             pitch = (int32_t)br_glide_advance(&br_mono_glide[p], n) + mapped - target;
         }
         if (pitch < 0) pitch = 0; else if (pitch > 16383) pitch = 16383;
+        if (br_plaits_gate_hold[p] && e->stage == BR_ENV_OFF) {
+            br_plaits_gate_hold[p] = 0u;            /* the amp release has ended: now the engine's own */
+            plaits_note_off(br_dsp[p].plaits, 128u);
+        }
         if (e->stage != BR_ENV_OFF || !plaits_quiet(br_dsp[p].plaits)) {
 #if defined(FM1_DEVICE)
             uint32_t synth_start = fm1_ticks();
@@ -8440,6 +8537,12 @@ static int32_t br_engine_post_part_row(uint32_t p, int32_t *row,
         if (e->stage != BR_ENV_OFF) {
             uint32_t calibration_q6 = br_audio_preset_gain(s->preset);
             br_env_refresh(e, s, 1u);
+#if defined(BR_POLY_SCHEDULER_EXPERIMENT) && BR_POLY_SCHEDULER_EXPERIMENT && defined(BR_SPLIT_AUDIO)
+            if (p == br_poly_tail_cut_part && e->stage == BR_ENV_RELEASE) {
+                uint32_t step = e->pos / BR_POLY_TAIL_CUT_SAMPLES + 1u;
+                if (e->release_step < step) e->release_step = step;
+            }
+#endif
             if (s->amp_mode && p < BR_SYNTH_PARTS) {
                 uint32_t level = s->mute ? 0u : br_bound(s->level, 127u);
                 for (i = 0; i < n; ++i) {

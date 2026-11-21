@@ -35,13 +35,9 @@ static int same_sound(uint32_t part, const br_bank_state_t *want)
 
 static void tick(uint32_t buttons) { br_sel_housekeeping(buttons); }
 
-/* To HOME from wherever. On the SMK-37 the HOME button (KNOB BANK) is "next category" on the synth
- * SOUNDS list, so there the list is left by a page button first. */
+/* To HOME from wherever, the SOUNDS list included. */
 static void leave_home(void)
 {
-#if BR_PRODUCT_SMK37
-    if (br_sel_browse() && br_ui.part != BR_DRUM_PART) { br_buttons(1u << BTN_ENV); tick(0u); }
-#endif
     br_buttons(1u << BTN_HOME); tick(0u);
 }
 

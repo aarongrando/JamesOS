@@ -59,7 +59,9 @@ BR_COLD_SIZE static uint8_t br_poly_render_on(br_poly_render_t *r, const br_soun
 
 BR_COLD_SIZE static uint8_t br_poly_render_off(br_poly_render_t *r, uint8_t note, uint32_t generation)
 {
-    uint8_t voice = br_poly_source_off(&r->source, note, generation);
+    uint8_t voice = br_poly_source_off_hold(&r->source, note, generation, 1u);
+    if (voice != BR_POLY_NO_VOICE && (r->envelope[voice].stage == BR_ENV_OFF || r->envelope[voice].stage == BR_ENV_RELEASE))
+        plaits_note_off(r->source.storage.voice[voice], 128u);   /* nothing left to hold the gate for */
     if (voice != BR_POLY_NO_VOICE && r->envelope[voice].stage != BR_ENV_OFF && r->envelope[voice].stage != BR_ENV_RELEASE) {
         r->envelope[voice].stage = BR_ENV_RELEASE;
         r->envelope[voice].release_start = r->envelope[voice].amp;
@@ -80,7 +82,10 @@ static void br_poly_render_voice(br_poly_render_t *r, uint8_t voice,
         pitch = (int32_t)br_glide_advance(&r->glide[voice], n) + pitch - target;
         if (pitch < 0) pitch = 0; else if (pitch > 16383) pitch = 16383;
     }
-    br_poly_source_render(&r->source, voice, pitch,
+    if (e->stage == BR_ENV_OFF && voice < r->source.allocator.limit && r->source.storage.voice[voice] &&
+        BR_PLAITS_GATE_FOLLOWS_ENV(br_poly_source_voice_model(&r->source, voice)))
+        plaits_note_off(r->source.storage.voice[voice], 128u);   /* a held gate drops once the release has ended */
+    br_poly_source_render_env(&r->source, voice, e->stage != BR_ENV_OFF, pitch,
         (uint16_t)br_scale_7bit_q15_exact(br_bound(sound->timbre, 127u)),
         (uint16_t)br_scale_7bit_q15_exact(br_bound(sound->color, 127u)),
         (uint16_t)br_scale_7bit_q15_exact(br_bound(sound->plaits_harmonics, 127u)),

@@ -68,8 +68,15 @@ int main(void)
         HD_CHECK(!memcmp(shown, fb + 112u * 240u, sizeof shown), "drum voice page shows no-settings message");
     }
     br_ui.part=0u;
+#if BR_PRODUCT_SMK37
+    /* SMK-37: KNOB BANK on the deep menu's second page returns to HOME rather than wrapping. */
+    br_buttons(1u<<BTN_HOME); HD_CHECK(br_ui.page==BR_PAGE_HOME && br_ui.screen[BR_PAGE_HOME]==0u,"KNOB BANK leaves the deep menu for HOME");
+    br_open_home_settings(); HD_CHECK(br_ui.screen[BR_PAGE_HOME]==2u,"OCT- + KNOB BANK opens the deep menu");
+    br_open_home_settings(); HD_CHECK(br_ui.screen[BR_PAGE_HOME]==0u,"HOME long press returns to sound");
+#else
     br_buttons(1u<<BTN_HOME); HD_CHECK(br_ui.screen[BR_PAGE_HOME]==2u,"HOME deep pages wrap");
     br_open_home_settings(); HD_CHECK(br_ui.screen[BR_PAGE_HOME]==0u,"HOME long press returns to sound");
+#endif
 #if BR_PRODUCT_SMK37
     /* SMK-37: EDIT has no KIT LEVEL; FADER BANK opens it and EDIT leaves it for PATCH 1. */
     br_buttons(1u<<BTN_EDIT); HD_CHECK(br_ui.screen[BR_PAGE_ROUTE]==0u && !br_gate_page(),"EDIT enters patch 1");

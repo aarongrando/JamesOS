@@ -149,6 +149,24 @@ int main(int argc, char **argv)
     br_draw(); HD_CHECK(br_ui.page == BR_PAGE_PATTERN, "br_ui.page == BR_PAGE_PATTERN");
     br_ui.part = 0u; br_draw(); HD_CHECK(br_ui.page == BR_PAGE_PATTERN, "br_ui.page == BR_PAGE_PATTERN");
     br_ui.part = BR_DRUM_PART; br_draw(); HD_CHECK(br_ui.page == BR_PAGE_PATTERN, "br_ui.page == BR_PAGE_PATTERN");
+    /* A running arpeggiator shows ARP: ON on the ARP page, in the page badge band. */
+    {
+        static uint16_t off[240u * 240u];
+        uint32_t changed = 0u, outside = 0u;
+        char path[256];
+        br_ui.part = 0u; br_arp_on = 0u; br_ui.redraw = 1u; br_draw();
+        memcpy(off, fb, sizeof off);
+        br_arp_on = 1u; br_ui.redraw = 1u; br_draw();
+        snprintf(path, sizeof path, "%s/arp_on_badge.ppm", hd_crop_dir);
+        hd_write_crop(path, fb, 240, 0, 0, 0, 240, 240, 2);
+        for (uint32_t i = 0u; i < 240u * 240u; ++i) if (off[i] != fb[i]) {
+            ++changed;
+            if (i / 240u < 40u || i / 240u >= 64u) ++outside;   /* the page badge band */
+        }
+        HD_CHECK(changed > 100u && !outside, "ARP: ON badge: changed %u outside %u", changed, outside);
+        br_arp_on = 0u; br_ui.redraw = 1u; br_draw();
+        HD_CHECK(!memcmp(off, fb, sizeof off), "ARP off: no badge");
+    }
     br_ui.page = BR_PAGE_HOME; HD_CHECK(!*br_oct_hint(), "!*br_oct_hint()");
     /* Each kit mixer knob edits its own drum and preserves the other lanes. */
     br_ui.part = BR_DRUM_PART; br_ui.page = BR_PAGE_ROUTE; br_ui.screen[BR_PAGE_ROUTE] = 3u;

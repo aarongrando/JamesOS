@@ -23,6 +23,36 @@ Both products share this source tree. Each has its own firmware package and cont
 
 [Release notes](docs/RELEASE-1.0b.md) · [Firmware and source downloads](https://github.com/aarongrando/JamesOS/releases/tag/v1.0b-build-3124)
 
+## Interface screenshots
+
+Screens rendered from the released **1.0b, build 3124** source for each device.
+
+### JamesOS · FM-1
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/images/build-3124/fm1-home.png"><img src="docs/images/build-3124/fm1-home.png" alt="JamesOS · FM-1: sound controls" width="320"></a><br>Sound controls</td>
+    <td align="center"><a href="docs/images/build-3124/fm1-envelope.png"><img src="docs/images/build-3124/fm1-envelope.png" alt="JamesOS · FM-1: amplitude envelope" width="320"></a><br>Amplitude envelope</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/images/build-3124/fm1-mixer.png"><img src="docs/images/build-3124/fm1-mixer.png" alt="JamesOS · FM-1: track mixer" width="320"></a><br>Track mixer</td>
+    <td align="center"><a href="docs/images/build-3124/fm1-drum-sequencer.png"><img src="docs/images/build-3124/fm1-drum-sequencer.png" alt="JamesOS · FM-1: drum sequencer" width="320"></a><br>Drum sequencer</td>
+  </tr>
+</table>
+
+### JamesOS-K · SMK-37 Pro
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/images/build-3124/smk37-home.png"><img src="docs/images/build-3124/smk37-home.png" alt="JamesOS-K · SMK-37 Pro: sound controls" width="320"></a><br>Sound controls</td>
+    <td align="center"><a href="docs/images/build-3124/smk37-envelope.png"><img src="docs/images/build-3124/smk37-envelope.png" alt="JamesOS-K · SMK-37 Pro: amplitude envelope" width="320"></a><br>Amplitude envelope</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/images/build-3124/smk37-pan.png"><img src="docs/images/build-3124/smk37-pan.png" alt="JamesOS-K · SMK-37 Pro: stereo panning" width="320"></a><br>Stereo panning</td>
+    <td align="center"><a href="docs/images/build-3124/smk37-step-editor.png"><img src="docs/images/build-3124/smk37-step-editor.png" alt="JamesOS-K · SMK-37 Pro: step editing with the keyboard" width="320"></a><br>Step editing with the keyboard</td>
+  </tr>
+</table>
+
 ## Make sounds, patterns and songs
 
 - **Synthesis:** 24 Plaits engines, 128 starting sounds, three synth tracks and a four-lane kit made with Plaits percussion.
